@@ -15,7 +15,7 @@
 #include "table.h"
 #include "column_family.h"
 #include "filter.h"
-#include "limits.h"
+#include "bigtable_limits.h"
 #include "range_set.h"
 #include "row_streamer.h"
 #include "google/cloud/internal/big_endian.h"
