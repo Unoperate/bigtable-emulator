@@ -1,7 +1,7 @@
 #include "test_util.h"
-#include "table.h"
 #include "google/cloud/status.h"
 #include "google/cloud/status_or.h"
+#include "table.h"
 #include <google/bigtable/admin/v2/table.pb.h>
 #include <google/bigtable/v2/bigtable.pb.h>
 #include <memory>

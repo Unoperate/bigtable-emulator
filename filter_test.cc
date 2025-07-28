@@ -13,19 +13,19 @@
 // limitations under the License.
 
 #include "filter.h"
-#include "cell_view.h"
-#include "range_set.h"
-#include "test_util.h"
 #include "google/cloud/status.h"
 #include "google/cloud/status_or.h"
 #include "google/cloud/testing_util/chrono_literals.h"
 #include "google/cloud/testing_util/status_matchers.h"
-#include "gmock/gmock.h"
-#include <google/bigtable/v2/data.pb.h>
 #include "absl/types/optional.h"
 #include "absl/types/variant.h"
-#include <gtest/gtest.h>
+#include "cell_view.h"
+#include "gmock/gmock.h"
+#include "range_set.h"
 #include "re2/re2.h"
+#include "test_util.h"
+#include <google/bigtable/v2/data.pb.h>
+#include <gtest/gtest.h>
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
