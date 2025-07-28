@@ -13,12 +13,12 @@
 // limitations under the License.
 
 #include "table.h"
+#include "google/cloud/testing_util/chrono_literals.h"
 #include "column_family.h"
 #include "filter.h"
 #include "range_set.h"
-#include "google/cloud/testing_util/chrono_literals.h"
-#include <gtest/gtest.h>
 #include "re2/re2.h"
+#include <gtest/gtest.h>
 #include <memory>
 #include <ostream>
 #include <sstream>

@@ -1,12 +1,12 @@
-#include "table.h"
 #include "google/cloud/internal/make_status.h"
 #include "google/cloud/status.h"
 #include "google/cloud/status_or.h"
 #include "google/cloud/testing_util/status_matchers.h"
+#include "absl/strings/str_format.h"
+#include "table.h"
 #include <google/bigtable/admin/v2/table.pb.h>
 #include <google/bigtable/v2/bigtable.pb.h>
 #include <google/bigtable/v2/data.pb.h>
-#include "absl/strings/str_format.h"
 #include <gtest/gtest.h>
 #include <chrono>
 #include <cstdint>

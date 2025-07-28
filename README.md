@@ -1,4 +1,4 @@
-# Single node, Memory Only Emulator for Google Bigtable
+# Single Node, Memory Only Emulator for Google Bigtable
 
 This is a single-node, non-persistent emulator for Google's Bigtable.
 
@@ -14,6 +14,13 @@ and enable compilation cache there with this line:
 build --disk_cache=~/.cache/bazel/disk-cache
 ```
 Note that the cache directory grows indefinitely.
+
+## Dependencies
+
+The Bigtable-emulator depends on `google-cloud-cpp` (which the build
+tools retrieve and build automatically) and the `abseil`
+library. Other dependencies such as `GRPC` are provided by
+`google-cloud-cpp`.
 
 ## Building
 
