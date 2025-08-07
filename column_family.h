@@ -15,15 +15,19 @@
 #ifndef GOOGLE_CLOUD_CPP_GOOGLE_CLOUD_BIGTABLE_EMULATOR_COLUMN_FAMILY_H
 #define GOOGLE_CLOUD_CPP_GOOGLE_CLOUD_BIGTABLE_EMULATOR_COLUMN_FAMILY_H
 
+#include "google/cloud/internal/big_endian.h"
+#include "google/cloud/status_or.h"
+#include "absl/types/optional.h"
 #include "cell_view.h"
 #include "filter.h"
 #include "filtered_map.h"
 #include "range_set.h"
-#include "google/cloud/internal/big_endian.h"
-#include "google/cloud/status_or.h"
-#include "absl/types/optional.h"
+#include <google/bigtable/admin/v2/table.pb.h>
 #include <google/bigtable/admin/v2/types.pb.h>
 #include <google/bigtable/v2/data.pb.h>
+#include <google/protobuf/duration.pb.h>
+#include <google/protobuf/repeated_field.h>
+#include <google/protobuf/stubs/mutex.h>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -135,9 +139,26 @@ class ColumnRow {
 
   void erase(const_iterator timestamp_it) { cells_.erase(timestamp_it); }
 
+  // The following methods implement support for column family level
+  // garbage collection (GcRule).
+  Status RunGC(google::bigtable::admin::v2::GcRule const& gc_rule);
+  void ApplyGCRuleMaxNumVersions(std::size_t n);
+  void ApplyGCRuleMaxAge(protobuf::Duration const& max_age);
+  void ApplyGCRuleIntersection(
+      protobuf::RepeatedPtrField<google::bigtable::admin::v2::GcRule> const&
+          rules);
+  void ApplyGCRuleUnion(
+      protobuf::RepeatedPtrField<google::bigtable::admin::v2::GcRule> const&
+          rules);
+
  private:
   // Note the order - the iterator return the freshest cells first.
   std::map<std::chrono::milliseconds, std::string, std::greater<>> cells_;
+
+  StatusOr<bool> GCRuleEraseVerdict(
+      google::bigtable::admin::v2::GcRule const& rule,
+      std::map<std::chrono::milliseconds, std::string,
+               std::greater<>>::const_iterator it);
 };
 
 /**
@@ -228,6 +249,17 @@ class ColumnFamilyRow {
     columns_.erase(column_it);
   }
 
+  Status RunGC(google::bigtable::admin::v2::GcRule const& gc_rule) {
+    for (auto& column : columns_) {
+      auto status = column.second.RunGC(gc_rule);
+      if (!status.ok()) {
+        return status;
+      }
+    }
+
+    return Status();
+  }
+
  private:
   friend class ColumnFamily;
 
@@ -246,12 +278,18 @@ class ColumnFamilyRow {
 class ColumnFamily {
  public:
   ColumnFamily() = default;
-  // ConstructAggregateColumnFamily can be used to return an aggregate
-  // ColumnFamily that can support AddToCell or MergeToCell and
-  // similar aggregate complex types. To construct an ordinary
-  // ColumnFamily, use the default constructor ColumnFamily().
-  static StatusOr<std::shared_ptr<ColumnFamily>> ConstructAggregateColumnFamily(
-      google::bigtable::admin::v2::Type value_type);
+  // ConstructColumnFamily can be used to return a ColumnFamily with
+  // non-zero/non-default values for the GC policy and/or the Value
+  // Type (the latter for aggregate column families which support
+  // AddToCell and the like).  To construct an ordinary ColumnFamily
+  // without GC or support for complex aggregation, use the default
+  // constructor ColumnFamily() or call ConstructColumnfamily()
+  // without any options.
+  static StatusOr<std::shared_ptr<ColumnFamily>> ConstructColumnFamily(
+      absl::optional<google::bigtable::admin::v2::Type> maybe_value_type =
+          absl::nullopt,
+      absl::optional<google::bigtable::admin::v2::GcRule> maybe_gc_rule =
+          absl::nullopt);
 
   // Disable copying.
   ColumnFamily(ColumnFamily const&) = delete;
@@ -387,11 +425,33 @@ class ColumnFamily {
     return value_type_;
   };
 
+  Status RunGC() {
+    if (!gc_rule_.has_value()) {
+      return Status();
+    }
+
+    for (auto& row : rows_) {
+      auto status = row.second.RunGC(gc_rule_.value());
+      if (!status.ok()) {
+        return status;
+      }
+    }
+
+    return Status();
+  }
+
+  void SetGCRule(const google::bigtable::admin::v2::GcRule& gc_rule) {
+    gc_rule_ = gc_rule;
+  }
+
  private:
   std::map<std::string, ColumnFamilyRow> rows_;
 
   // Support for aggregate and other complex types.
   absl::optional<google::bigtable::admin::v2::Type> value_type_ = absl::nullopt;
+
+  // Support for garbage collection (GcRule)
+  absl::optional<google::bigtable::admin::v2::GcRule> gc_rule_ = absl::nullopt;
 
   static StatusOr<std::string> DefaultUpdateCell(
       std::string const& /*existing_value*/, std::string&& new_value) {

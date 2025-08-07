@@ -13,15 +13,15 @@
 // limitations under the License.
 
 #include "filter.h"
-#include "range_set.h"
 #include "google/cloud/bigtable/internal/google_bytes_traits.h"
 #include "google/cloud/internal/invoke_result.h"
 #include "google/cloud/internal/make_status.h"
 #include "google/cloud/status_or.h"
-#include <google/bigtable/v2/data.pb.h>
 #include "absl/types/optional.h"
 #include "absl/types/variant.h"
+#include "range_set.h"
 #include "re2/re2.h"
+#include <google/bigtable/v2/data.pb.h>
 #include <algorithm>
 #include <cassert>
 #include <cstddef>

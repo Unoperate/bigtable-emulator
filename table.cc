@@ -13,28 +13,28 @@
 // limitations under the License.
 
 #include "table.h"
-#include "column_family.h"
-#include "filter.h"
-#include "bigtable_limits.h"
-#include "range_set.h"
-#include "row_streamer.h"
 #include "google/cloud/internal/big_endian.h"
 #include "google/cloud/internal/make_status.h"
 #include "google/cloud/status.h"
 #include "google/cloud/status_or.h"
+#include "absl/strings/match.h"
+#include "absl/strings/str_format.h"
+#include "absl/types/optional.h"
+#include "absl/types/variant.h"
+#include "bigtable_limits.h"
+#include "column_family.h"
+#include "filter.h"
 #include "google/protobuf/util/field_mask_util.h"
+#include "range_set.h"
+#include "re2/re2.h"
+#include "row_streamer.h"
 #include <google/bigtable/admin/v2/bigtable_table_admin.pb.h>
 #include <google/bigtable/admin/v2/table.pb.h>
 #include <google/bigtable/admin/v2/types.pb.h>
 #include <google/bigtable/v2/bigtable.pb.h>
 #include <google/bigtable/v2/data.pb.h>
 #include <google/protobuf/field_mask.pb.h>
-#include "absl/strings/match.h"
-#include "absl/strings/str_format.h"
-#include "absl/types/optional.h"
-#include "absl/types/variant.h"
 #include <grpcpp/support/sync_stream.h>
-#include "re2/re2.h"
 #include <cassert>
 #include <chrono>
 #include <climits>
@@ -50,6 +50,7 @@
 #include <ostream>
 #include <stack>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -61,6 +62,35 @@ namespace emulator {
 
 namespace btadmin = ::google::bigtable::admin::v2;
 
+// Call StartGCThreadOnce instead of calling StartGCThread.
+void Table::StartGCThread() {
+  // This will move the thread.
+  gc_thread_ = std::thread([this]() {
+    std::unique_lock<std::mutex> lock(gc_mtx_);
+
+    while (!stop_flag_.load()) {
+      cv_.wait_for(lock, std::chrono::seconds(60),
+                   [this] { return stop_flag_.load(); });
+
+      if (stop_flag_.load()) {
+        return;
+      }
+
+      // RunGC takes the table lock.
+      auto status = RunGC();
+      if (status.ok()) {
+        std::cerr << "RunGC stopped with error: " << status.message()
+                  << std::endl;
+        return;
+      }
+    }
+  });
+}
+
+void Table::StartGCThreadOnce() {
+  std::call_once(start_gc_once_flag_, &Table::StartGCThread, this);
+}
+
 StatusOr<std::shared_ptr<Table>> Table::Create(
     google::bigtable::admin::v2::Table schema) {
   std::shared_ptr<Table> res(new Table);
@@ -68,6 +98,9 @@ StatusOr<std::shared_ptr<Table>> Table::Create(
   if (!status.ok()) {
     return status;
   }
+
+  res->StartGCThreadOnce();
+
   return res;
 }
 
@@ -106,23 +139,25 @@ Status Table::Construct(google::bigtable::admin::v2::Table schema) {
   for (auto const& column_family_def : schema_.column_families()) {
     absl::optional<google::bigtable::admin::v2::Type> opt_value_type =
         absl::nullopt;
+    absl::optional<google::bigtable::admin::v2::GcRule> opt_gc_rule =
+        absl::nullopt;
 
     // Support for complex types (AddToCell aggregations, e.t.c.).
     if (column_family_def.second.has_value_type()) {
       opt_value_type = column_family_def.second.value_type();
     }
 
-    if (opt_value_type.has_value()) {
-      auto cf =
-          ColumnFamily::ConstructAggregateColumnFamily(opt_value_type.value());
-      if (!cf) {
-        return cf.status();
-      }
-      column_families_.emplace(column_family_def.first, cf.value());
-    } else {
-      column_families_.emplace(column_family_def.first,
-                               std::make_shared<ColumnFamily>());
+    // Support for column family garbage collection
+    if (column_family_def.second.has_gc_rule()) {
+      opt_gc_rule = column_family_def.second.gc_rule();
     }
+
+    auto cf = ColumnFamily::ConstructColumnFamily(opt_value_type, opt_gc_rule);
+    if (!cf) {
+      return cf.status();
+    }
+
+    column_families_.emplace(column_family_def.first, cf.value());
   }
 
   return Status();
@@ -163,8 +198,6 @@ StatusOr<btadmin::Table> Table::ModifyColumnFamilies(
       }
 
       using google::protobuf::util::FieldMaskUtil;
-
-      using google::protobuf::util::FieldMaskUtil;
       google::protobuf::FieldMask effective_mask;
       if (modification.has_update_mask()) {
         effective_mask = modification.update_mask();
@@ -175,7 +208,21 @@ StatusOr<btadmin::Table> Table::ModifyColumnFamilies(
               GCP_ERROR_INFO().WithMetadata("modification",
                                             modification.DebugString()));
         }
+
+        // Disallow the modification of the type of data stored in the
+        // column family (the aggregate type -- which is currently the
+        // only supported type -- can always be set during column family
+        // creation).
+        if (FieldMaskUtil::IsPathInFieldMask("value_type", effective_mask)) {
+          return InvalidArgumentError(
+              "The value_type cannot be changed after column family creation",
+              GCP_ERROR_INFO().WithMetadata("mask",
+                                            effective_mask.DebugString()));
+        }
       } else {
+        // According to the proto spec, if the mask is unset in the
+        // request, we treat the request as requesting that gc_rule be
+        // modified.
         FieldMaskUtil::FromString("gc_rule", &effective_mask);
         if (!FieldMaskUtil::IsValidFieldMask<
                 google::bigtable::admin::v2::ColumnFamily>(effective_mask)) {
@@ -185,34 +232,45 @@ StatusOr<btadmin::Table> Table::ModifyColumnFamilies(
         }
       }
 
-      // Disallow the modification of the type of data stored in the
-      // column family (the aggregate type -- which is currently the
-      // only supported type -- can always be set during column family
-      // creation).
-      if (FieldMaskUtil::IsPathInFieldMask("value_type", effective_mask)) {
-        return InvalidArgumentError(
-            "The value_type cannot be changed after column family creation",
-            GCP_ERROR_INFO().WithMetadata("mask",
-                                          effective_mask.DebugString()));
-      }
-
       FieldMaskUtil::MergeMessageTo(modification.update(), effective_mask,
                                     FieldMaskUtil::MergeOptions(),
                                     &(cf_it->second));
+
+      // Actually update the runtime gc_rule for the column family
+      // class, provided it is set in the update.
+      if (modification.update().has_gc_rule()) {
+        auto it = new_column_families.find(modification.id());
+        if (it == new_column_families.end()) {
+          return InvalidArgumentError(
+              "Attempt to modify Column Family that is not running",
+              GCP_ERROR_INFO().WithMetadata("Column Family",
+                                            modification.id()));
+        }
+
+        it->second->SetGCRule(modification.update().gc_rule());
+      }
     } else if (modification.has_create()) {
       std::shared_ptr<ColumnFamily> cf;
-      // Have we been asked to create an aggregate column family?
+      absl::optional<google::bigtable::admin::v2::Type> value_type =
+          absl::nullopt;
+      absl::optional<google::bigtable::admin::v2::GcRule> gc_rule =
+          absl::nullopt;
+
       if (modification.create().has_value_type()) {
-        auto value_type = modification.create().value_type();
-        auto maybe_cf =
-            ColumnFamily::ConstructAggregateColumnFamily(value_type);
-        if (!maybe_cf) {
-          return maybe_cf.status();
-        }
-        cf = std::move(maybe_cf.value());
-      } else {
-        cf = std::make_shared<ColumnFamily>();
+        value_type = modification.create().value_type();
       }
+
+      if (modification.create().has_gc_rule()) {
+        gc_rule = modification.create().gc_rule();
+      }
+
+      auto maybe_cf = ColumnFamily::ConstructColumnFamily(value_type, gc_rule);
+
+      if (!maybe_cf) {
+        return maybe_cf.status();
+      }
+      cf = std::move(maybe_cf.value());
+
       if (!new_column_families.emplace(modification.id(), cf).second) {
         return AlreadyExistsError(
             "Column family already exists.",
