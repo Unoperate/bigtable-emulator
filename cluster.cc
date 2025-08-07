@@ -13,11 +13,11 @@
 // limitations under the License.
 
 #include "cluster.h"
-#include "table.h"
 #include "google/cloud/internal/make_status.h"
 #include "google/cloud/status.h"
 #include "google/cloud/status_or.h"
 #include "absl/strings/match.h"
+#include "table.h"
 #include <google/bigtable/admin/v2/table.pb.h>
 #include <iostream>
 #include <map>

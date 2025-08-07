@@ -81,6 +81,8 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(google-cloud-cpp)
 
+find_package(Protobuf REQUIRED)
+
 add_library(
     bigtable_emulator_common # cmake-format: sort
     cell_view.h
@@ -110,7 +112,8 @@ target_link_libraries(
     google-cloud-cpp::bigtable
     google-cloud-cpp::bigtable_protos
     google-cloud-cpp::common
-    google-cloud-cpp::grpc_utils)
+    google-cloud-cpp::grpc_utils
+    ${PROTOBUF_LIBRARIES})
 
 google_cloud_cpp_add_common_options(bigtable_emulator_common)
 
@@ -128,6 +131,7 @@ if (BUILD_TESTING)
         drop_row_range_test.cc
         filter_test.cc
         filtered_map_test.cc
+        gc_test.cc
         mutations_test.cc
         range_set_test.cc
         server_test.cc

@@ -15,9 +15,9 @@
 #ifndef GOOGLE_CLOUD_CPP_GOOGLE_CLOUD_BIGTABLE_EMULATOR_TEST_UTIL_H
 #define GOOGLE_CLOUD_CPP_GOOGLE_CLOUD_BIGTABLE_EMULATOR_TEST_UTIL_H
 
-#include "table.h"
 #include "google/cloud/status.h"
 #include "google/cloud/status_or.h"
+#include "table.h"
 #include <cstdint>
 #include <memory>
 #include <string>
