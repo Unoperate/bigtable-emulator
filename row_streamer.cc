@@ -13,9 +13,9 @@
 // limitations under the License.
 
 #include "row_streamer.h"
+#include "absl/types/optional.h"
 #include "cell_view.h"
 #include <google/bigtable/v2/bigtable.pb.h>
-#include "absl/types/optional.h"
 #include <chrono>
 #include <utility>
 

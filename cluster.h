@@ -15,9 +15,9 @@
 #ifndef GOOGLE_CLOUD_CPP_GOOGLE_CLOUD_BIGTABLE_EMULATOR_CLUSTER_H
 #define GOOGLE_CLOUD_CPP_GOOGLE_CLOUD_BIGTABLE_EMULATOR_CLUSTER_H
 
-#include "table.h"
 #include "google/cloud/status.h"
 #include "google/cloud/status_or.h"
+#include "table.h"
 #include <google/bigtable/admin/v2/table.pb.h>
 #include <map>
 #include <memory>
