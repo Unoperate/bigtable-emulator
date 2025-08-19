@@ -78,7 +78,7 @@ void Table::StartGCThread() {
 
       // RunGC takes the table lock.
       auto status = RunGC();
-      if (status.ok()) {
+      if (!status.ok()) {
         std::cerr << "RunGC stopped with error: " << status.message()
                   << std::endl;
         return;

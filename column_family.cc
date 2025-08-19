@@ -233,7 +233,7 @@ Status ColumnRow::RunGC(google::bigtable::admin::v2::GcRule const& gc_rule) {
       break;
     }
     case google::bigtable::admin::v2::GcRule::kUnion: {
-      auto const& rules = gc_rule.intersection().rules();
+      auto const& rules = gc_rule.union_().rules();
       for (auto it = cells_.begin(); it != cells_.end();) {
         auto delete_it = false;
         for (auto const& rule : rules) {
@@ -408,7 +408,7 @@ StatusOr<bool> ColumnRow::GCRuleEraseVerdict(
       return true;
     }
     case google::bigtable::admin::v2::GcRule::kUnion: {
-      auto rules = rule.intersection().rules();
+      auto rules = rule.union_().rules();
       for (auto const& r : rules) {
         auto maybe_verdict = GCRuleEraseVerdict(r, it);
         if (!maybe_verdict) {
