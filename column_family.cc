@@ -323,28 +323,6 @@ bool TimestampIsOlderThan(std::chrono::milliseconds timestamp,
 // rule. Otherwise it returns false or an error status if the rule or
 // any other rule it transitively contains fails to meet some
 // invariant.
-//
-// Note that since a column family GCRule configuration must serialize
-// to at most 500 bytes
-// (https://github.com/googleapis/googleapis/blob/6d3a7f1b08c60a00926f7b15a1db69ec71bf501a/google/bigtable/admin/v2/table.proto#L343)
-// and (in the case of a GCRule containing only a small
-// max_num_versions) the minimum size of a GCRule is >= 2 bytes, a
-// GCRule within size limits can embed at most 250 GCRules, which is
-// also the maximum depth of recursion for this function.
-//
-// So we can expect that the maximum size of the stack used in
-// recursion will be < 250KB, assuming each recursive call takes up
-// less than 1KB of stack size (at most 500B for the rule and well
-// less than 500B for the rest of the automatic variables -- which are
-// all integers or pointers and would need to be > 60 in number for
-// any call to exceed 500B).
-//
-// Therefore, since we enforce the size limit for a column family
-// GCRule configuration before we store or modify it, it is safe to
-// use recursion here (MacOS X has the lowest default stack size of
-// 512KiB).
-//
-// NOLINTBEGIN(misc-no-recursion)
 StatusOr<bool> ColumnRow::GCRuleEraseVerdict(
     google::bigtable::admin::v2::GcRule const& rule,
     std::map<std::chrono::milliseconds, std::string,
@@ -379,11 +357,6 @@ StatusOr<bool> ColumnRow::GCRuleEraseVerdict(
       // which are just the cells that have a timestamp less than
       // the timestamp of the cell pointed to by `it', since cells
       // are in the reverse order of timestamps.
-      //
-      // FIXME: This operation is linear in the number of cells in the
-      // column, meaning that in the worst case, if we iterate over
-      // all the cells in the column to get a verdict, the total time
-      // is quadratic in the number of cells in the column.
       std::advance(it_2, n);
 
       // Now it_2 points to the first cell that should be
@@ -430,7 +403,6 @@ StatusOr<bool> ColumnRow::GCRuleEraseVerdict(
     }
   }
 }
-// NOLINTEND(misc-no-recursion)
 
 void ColumnRow::ApplyGCRuleIntersection(
     protobuf::RepeatedPtrField<google::bigtable::admin::v2::GcRule> const&
