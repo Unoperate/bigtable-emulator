@@ -21,7 +21,6 @@
 #include <chrono>
 #include <memory>
 #include <string>
-#include <thread>
 
 namespace google {
 namespace cloud {
