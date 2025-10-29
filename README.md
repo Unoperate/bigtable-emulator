@@ -26,6 +26,14 @@ bazel test ...
 bigtable-emulator -p <port>
 ```
 
+## Development
+
+### `compile_commands.json`
+If you need to generate `compile_commands.json` for your tooling, run:
+```shell
+bazel run --config=compilecommands @hedron_compile_commands//:refresh_all
+```
+
 ## Contributing changes
 
 See [`CONTRIBUTING.md`](/CONTRIBUTING.md) for details on how to contribute to

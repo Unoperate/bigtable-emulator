@@ -32,6 +32,9 @@ build:macos --host_cxxopt=-std=c++14
 # the project separately.
 build --experimental_convenience_symlinks=ignore
 
+# Allow the to opt into convenience links for tools relying on them.
+run:compilecommands --experimental_convenience_symlinks=normal
+
 # We mirror critical tarballs from several sources in case the canonical source
 # is temporarily unavailable, e.g., github.com being down. This option and flag
 # automatically rewrites the URLs.

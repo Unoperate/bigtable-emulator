@@ -80,3 +80,11 @@ git_repository(
     patches = ["//bazel:google_cloud_cpp.patch"],
     patch_args = ["-p1"],
 )
+
+# TODO: switch to hedronvision/bazel-compile-commands-extractor once https://github.com/hedronvision/bazel-compile-commands-extractor/pull/219 lands
+bazel_dep(name = "hedron_compile_commands", dev_dependency = True)
+git_override(
+    module_name = "hedron_compile_commands",
+    remote = "https://github.com/mikael-s-persson/bazel-compile-commands-extractor.git",
+    commit = "02d15621b528efd877f5d5657c4b738523a0eb17",
+)
