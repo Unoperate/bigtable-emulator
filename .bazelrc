@@ -32,6 +32,9 @@ build:macos --host_cxxopt=-std=c++14
 # the project separately.
 build --experimental_convenience_symlinks=ignore
 
+# Generate compile_commands.json for tools that require it.
+run:compile-commands --experimental_convenience_symlinks=normal @hedron_compile_commands//:refresh_all
+
 # We mirror critical tarballs from several sources in case the canonical source
 # is temporarily unavailable, e.g., github.com being down. This option and flag
 # automatically rewrites the URLs.

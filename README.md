@@ -49,6 +49,12 @@ bigtable-emulator -p <port>
 clang-format -i -style=file -assume-filename=.clang-format **/*.cc **/*.h
 ```
 
+### `compile_commands.json`
+If you need to generate `compile_commands.json` for your tooling, run:
+```shell
+bazel run --config=compile-commands
+```
+
 ## Contributing changes
 
 See [`CONTRIBUTING.md`](/CONTRIBUTING.md) for details on how to contribute to

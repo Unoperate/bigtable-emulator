@@ -86,3 +86,11 @@ git_repository(
     commit = "496018e020cf0a7d813a2b5a9d246ec55340a7ed",
     remote = "https://github.com/erenon/bazel_clang_tidy.git",
 )
+
+# FIXME: switch to hedronvision/bazel-compile-commands-extractor once https://github.com/hedronvision/bazel-compile-commands-extractor/pull/219 lands
+bazel_dep(name = "hedron_compile_commands", dev_dependency = True)
+git_override(
+    module_name = "hedron_compile_commands",
+    remote = "https://github.com/mikael-s-persson/bazel-compile-commands-extractor.git",
+    commit = "02d15621b528efd877f5d5657c4b738523a0eb17",
+)
