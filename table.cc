@@ -77,12 +77,7 @@ void Table::StartGCThread() {
       }
 
       // RunGC takes the table lock.
-      auto status = RunGC();
-      if (!status.ok()) {
-        std::cerr << "RunGC stopped with error: " << status.message()
-                  << std::endl;
-        return;
-      }
+      RunGC();
     }
   });
 }
@@ -239,9 +234,9 @@ StatusOr<btadmin::Table> Table::ModifyColumnFamilies(
       // Actually update the runtime gc_rule for the column family
       // class, provided it is set in the update.
       if (modification.update().has_gc_rule()) {
-        // Check GCRule for the 500 byte limit.
-        auto status =
-            CheckGCRuleSizeIsBelowLimit(modification.update().gc_rule());
+        google::bigtable::admin::v2::GcRule const& gc_rule =
+            modification.update().gc_rule();
+        auto status = CheckGCRuleIsValid(gc_rule);
         if (!status.ok()) {
           return status;
         }
@@ -253,8 +248,7 @@ StatusOr<btadmin::Table> Table::ModifyColumnFamilies(
               GCP_ERROR_INFO().WithMetadata("Column Family",
                                             modification.id()));
         }
-
-        it->second->SetGCRule(modification.update().gc_rule());
+        it->second->SetGCRule(gc_rule);
       }
     } else if (modification.has_create()) {
       std::shared_ptr<ColumnFamily> cf;
@@ -268,14 +262,11 @@ StatusOr<btadmin::Table> Table::ModifyColumnFamilies(
       }
 
       if (modification.create().has_gc_rule()) {
-        // Check GCRule for the 500 byte limit.
-        auto status =
-            CheckGCRuleSizeIsBelowLimit(modification.create().gc_rule());
+        gc_rule = modification.create().gc_rule();
+        auto status = CheckGCRuleIsValid(gc_rule.value());
         if (!status.ok()) {
           return status;
         }
-
-        gc_rule = modification.create().gc_rule();
       }
 
       auto maybe_cf = ColumnFamily::ConstructColumnFamily(value_type, gc_rule);

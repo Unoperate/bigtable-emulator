@@ -20,7 +20,9 @@ namespace google {
 namespace cloud {
 namespace bigtable {
 namespace emulator {
+// https://github.com/googleapis/googleapis/blob/6d3a7f1b08c60a00926f7b15a1db69ec71bf501a/google/bigtable/v2/data.proto#L37
 constexpr std::size_t kMaxRowLen = 2 << 11;
+// https://github.com/googleapis/googleapis/blob/6d3a7f1b08c60a00926f7b15a1db69ec71bf501a/google/bigtable/admin/v2/table.proto#L343
 constexpr std::size_t kMaxGCRuleSize = 500;
 }  // namespace emulator
 }  // namespace bigtable
