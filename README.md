@@ -6,6 +6,15 @@ It should pass all the integration tests in Google's C++ client
 repository (google-cloud-cpp), except those that must run against
 production Bigtable.
 
+## Development
+
+It's a good idea to set home (`$HOME/.bazelrc` on Unixes) or system `bazelrc`
+and enable compilation cache there with this line:
+```
+build --disk_cache=~/.cache/bazel/disk-cache
+```
+Note that the cache directory grows indefinitely.
+
 ## Building
 
 Building the Bigtable emulator requires `bazel`.
