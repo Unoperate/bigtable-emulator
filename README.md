@@ -20,6 +20,12 @@ bazel build ...
 bazel test ...
 ```
 
+## Running clang-tidy with Bazel
+
+```shell
+bazel build --config clang-tidy //...
+```
+
 ### Running the Emulator
 
 ```shell
