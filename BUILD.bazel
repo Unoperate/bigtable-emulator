@@ -58,3 +58,9 @@ gen_cc_tests(
         "@google_cloud_cpp//google/cloud/testing_util:google_cloud_cpp_testing",
     ],
 )
+
+filegroup(
+    name = "clang_tidy_config",
+    srcs = [".clang-tidy"],
+    visibility = ["//visibility:public"],
+)
