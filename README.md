@@ -31,7 +31,7 @@ bigtable-emulator -p <port>
 ### `compile_commands.json`
 If you need to generate `compile_commands.json` for your tooling, run:
 ```shell
-bazel run --config=compilecommands @hedron_compile_commands//:refresh_all
+bazel run --config=compile-commands
 ```
 
 ## Contributing changes

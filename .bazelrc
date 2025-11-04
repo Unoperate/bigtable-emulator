@@ -33,7 +33,7 @@ build:macos --host_cxxopt=-std=c++14
 build --experimental_convenience_symlinks=ignore
 
 # Allow the to opt into convenience links for tools relying on them.
-run:compilecommands --experimental_convenience_symlinks=normal
+run:compile-commands --experimental_convenience_symlinks=normal @hedron_compile_commands//:refresh_all
 
 # We mirror critical tarballs from several sources in case the canonical source
 # is temporarily unavailable, e.g., github.com being down. This option and flag
