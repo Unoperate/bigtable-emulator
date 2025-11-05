@@ -26,7 +26,7 @@
 #include <google/longrunning/operations.pb.h>
 #include <google/protobuf/empty.pb.h>
 #include <google/protobuf/util/time_util.h>
-#include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include <grpcpp/impl/call_op_set.h>
 #include <grpcpp/security/server_credentials.h>
 #include <grpcpp/server.h>
@@ -367,7 +367,7 @@ StatusOr<std::unique_ptr<EmulatorServer>> CreateDefaultEmulatorServer(
     return UnknownError("An unknown error occurred when starting server",
                         GCP_ERROR_INFO()
                             .WithMetadata("host", host)
-                            .WithMetadata("port", absl::StrCat("%d", port)));
+                            .WithMetadata("port", absl::StrFormat("%d", port)));
   }
 
   return std::unique_ptr<EmulatorServer>(default_emulator_server);

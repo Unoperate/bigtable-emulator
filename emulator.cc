@@ -16,7 +16,7 @@
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
 #include "absl/flags/usage.h"
-#include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -29,7 +29,7 @@ ABSL_FLAG(std::uint16_t, port, 8888,
 
 int main(int argc, char* argv[]) {
   absl::SetProgramUsageMessage(
-      absl::StrCat("Usage: %s -h <host> -p <port>", argv[0]));
+      absl::StrFormat("Usage: %s -h <host> -p <port>", argv[0]));
   absl::ParseCommandLine(argc, argv);
 
   auto maybe_server =
