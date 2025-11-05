@@ -486,6 +486,9 @@ TEST_F(GCTest, MaxAgeBoundaryCondition) {
             GetColumnTimestamps("row1", "col1"));
 }
 
+// FIXME: Write some concurrency tests once garbage collections starts taking
+// more granular locks instead of the table ones.
+
 TEST(GCRuleTest, UnsetRuleIsValid) {
   google::bigtable::admin::v2::GcRule gc_rule;
   auto status = CheckGCRuleIsValid(gc_rule);
