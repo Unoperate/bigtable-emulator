@@ -18,6 +18,7 @@
 #include "google/cloud/internal/big_endian.h"
 #include "google/cloud/status_or.h"
 #include "absl/types/optional.h"
+#include "bigtable_limits.h"
 #include "cell_view.h"
 #include "filter.h"
 #include "filtered_map.h"
@@ -42,8 +43,37 @@ namespace cloud {
 namespace bigtable {
 namespace emulator {
 
-Status CheckGCRuleSizeIsBelowLimit(
-    google::bigtable::admin::v2::GcRule const& rule);
+// Many of the GC-related functions are recursive. Below we prove
+// this approach's safety.
+//
+// Note that since a column family GCRule configuration must serialize
+// to at most kMaxGCRuleSize (500) bytes and (in the case of a GCRule
+// containing only a small max_num_versions) the minimum size of a GCRule
+// is >= 2 bytes, a GCRule within size limits can embed at most 250 GCRules,
+// which is also the maximum depth of recursion for this function.
+//
+// So we can expect that the maximum size of the stack used in
+// recursion will be < 250KB, assuming each recursive call takes up
+// less than 1KB of stack size (at most 500B for the rule and well
+// less than 500B for the rest of the automatic variables -- which are
+// all integers or pointers and would need to be > 60 in number for
+// any call to exceed 500B).
+//
+// Therefore, since we enforce the size limit for a column family
+// GCRule configuration before we store or modify it, it is safe to
+// use recursion on the validated GCRules (MacOS X has the lowest default
+// stack size of 512KiB).
+static_assert(kMaxGCRuleSize == 500,
+              "Max GC rule size changed. Recheck the logic of proof above.");
+
+/**
+ * Validates a GcRule before further processing.
+ *
+ * This function MUST be called on every GcRule object, there are multiple
+ * places where it is assumed by the code. Objects that fail the validation
+ * MUST not be passed as arguments to GC-related functions.
+ */
+Status CheckGCRuleIsValid(google::bigtable::admin::v2::GcRule const& rule);
 
 struct Cell {
   std::chrono::milliseconds timestamp;
@@ -147,26 +177,32 @@ class ColumnRow {
     return cells_.erase(timestamp_it);
   }
 
-  // The following methods implement support for column family level
-  // garbage collection (GcRule).
-  Status RunGC(google::bigtable::admin::v2::GcRule const& gc_rule);
-  void ApplyGCRuleMaxNumVersions(std::size_t n);
-  Status ApplyGCRuleMaxAge(protobuf::Duration const& max_age);
-  Status ApplyGCRuleIntersection(
-      protobuf::RepeatedPtrField<google::bigtable::admin::v2::GcRule> const&
-          rules);
-  Status ApplyGCRuleUnion(
-      protobuf::RepeatedPtrField<google::bigtable::admin::v2::GcRule> const&
-          rules);
+  /**
+   * Runs garbage collection as defined by the passed GC rule.
+   *
+   * @param gc_rule The definition of garbage collection to be performed.
+   * Note that it is assumed to be valid. That assumption is guarded using
+   * assertions in debug build, but there are no guardrails in the release
+   * build.
+   */
+  void RunGC(google::bigtable::admin::v2::GcRule const& gc_rule);
 
  private:
   // Note the order - the iterator return the freshest cells first.
   std::map<std::chrono::milliseconds, std::string, std::greater<>> cells_;
 
-  StatusOr<bool> GCRuleEraseVerdict(
-      google::bigtable::admin::v2::GcRule const& rule,
-      std::map<std::chrono::milliseconds, std::string,
-               std::greater<>>::const_iterator it);
+  // GCRuleEraseVerdict returns true if the cell pointed to by the
+  // iterator `it` should be erased according to the GcRule `rule`.
+  // Otherwise, it returns false.
+  bool GCRuleEraseVerdict(google::bigtable::admin::v2::GcRule const& rule,
+                          std::map<std::chrono::milliseconds, std::string,
+                                   std::greater<>>::const_iterator it,
+                          int32_t version_rank);
+  // The following methods implement support for column family level
+  // garbage collection.
+  void ApplyGCRuleMaxNumVersions(std::size_t n);
+  void ApplyGCRuleMaxAge(protobuf::Duration const& max_age);
+  void ApplyGCRuleVerdict(google::bigtable::admin::v2::GcRule const& gc_rule);
 };
 
 /**
@@ -258,7 +294,7 @@ class ColumnFamilyRow {
     return columns_.erase(column_it);
   }
 
-  Status RunGC(google::bigtable::admin::v2::GcRule const& gc_rule);
+  void RunGC(google::bigtable::admin::v2::GcRule const& gc_rule);
 
  private:
   friend class ColumnFamily;
@@ -425,7 +461,7 @@ class ColumnFamily {
     return value_type_;
   };
 
-  Status RunGC();
+  void RunGC();
 
   void SetGCRule(google::bigtable::admin::v2::GcRule const& gc_rule) {
     gc_rule_ = gc_rule;

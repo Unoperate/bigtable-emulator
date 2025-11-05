@@ -121,16 +121,12 @@ class Table : public std::enable_shared_from_this<Table> {
 
   // Runs GC for each of the column families. It takes the table lock
   // at the beginning and only releases when GC for the last column
-  // family is completed, or the GC of a column family ends with an
-  // error code.
+  // family is completed.
   Status RunGC() {
     std::lock_guard<std::mutex> lock(mu_);
 
     for (auto& cf : column_families_) {
-      auto status = cf.second->RunGC();
-      if (!status.ok()) {
-        return status;
-      }
+      cf.second->RunGC();
     }
 
     return Status();

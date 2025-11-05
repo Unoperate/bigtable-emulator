@@ -19,6 +19,7 @@
 #include <google/protobuf/duration.pb.h>
 #include <gtest/gtest.h>
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -53,6 +54,7 @@ class GCTest : public ::testing::Test {
 
     cf_->SetCell("row2", "col1", 100_ms, "v9");
     cf_->SetCell("row2", "col1", 200_ms, "v10");
+
     cf_->SetCell("row2", "col2", 300_ms, "v11");
   }
 
@@ -66,13 +68,26 @@ class GCTest : public ::testing::Test {
     return count;
   }
 
+  std::set<std::chrono::milliseconds> GetColumnTimestamps(
+      std::string const& row_key, std::string const& col_key) {
+    std::set<std::chrono::milliseconds> column_timestamps;
+    auto row_it = cf_->find(row_key);
+    if (row_it == cf_->end()) {
+      return column_timestamps;
+    }
+    auto col_it = row_it->second.find(col_key);
+    if (col_it == row_it->second.end()) {
+      return column_timestamps;
+    };
+    std::transform(col_it->second.begin(), col_it->second.end(),
+                   std::inserter(column_timestamps, column_timestamps.begin()),
+                   [](auto const& pair) { return pair.first; });
+    return column_timestamps;
+  }
+
   int CountCellsInColumn(std::string const& row_key,
                          std::string const& col_key) {
-    auto row_it = cf_->find(row_key);
-    if (row_it == cf_->end()) return 0;
-    auto col_it = row_it->second.find(col_key);
-    if (col_it == row_it->second.end()) return 0;
-    return static_cast<int>(col_it->second.size());
+    return GetColumnTimestamps(row_key, col_key).size();
   }
 
   std::shared_ptr<ColumnFamily> cf_;
@@ -85,9 +100,8 @@ TEST_F(GCTest, MaxNumVersionsKeepsAllWhenBelowLimit) {
   google::bigtable::admin::v2::GcRule gc_rule;
   gc_rule.set_max_num_versions(10);
   cf_->SetGCRule(gc_rule);
+  cf_->RunGC();
 
-  auto status = cf_->RunGC();
-  EXPECT_TRUE(status.ok());
   EXPECT_EQ(11, CountTotalCells());
 }
 
@@ -99,41 +113,19 @@ TEST_F(GCTest, MaxNumVersionsRemovesOldestCells) {
   google::bigtable::admin::v2::GcRule gc_rule;
   gc_rule.set_max_num_versions(3);
   cf_->SetGCRule(gc_rule);
-
-  auto status = cf_->RunGC();
-  EXPECT_TRUE(status.ok());
+  cf_->RunGC();
 
   // Each column keeps its 3 newest cells (or all if it has ≤3)
-  EXPECT_EQ(3, CountCellsInColumn("row1", "col1"));  // was 5, keeps 3 newest
-  EXPECT_EQ(3, CountCellsInColumn("row1", "col2"));  // was 3, keeps all 3
-  EXPECT_EQ(2, CountCellsInColumn("row2", "col1"));  // was 2, keeps all 2
-  EXPECT_EQ(1, CountCellsInColumn("row2", "col2"));  // was 1, keeps all 1
+  EXPECT_EQ((std::set<std::chrono::milliseconds>{500_ms, 400_ms, 300_ms}),
+            GetColumnTimestamps("row1", "col1"));  // was 5, keeps 3 newest
+  EXPECT_EQ((std::set<std::chrono::milliseconds>{350_ms, 250_ms, 150_ms}),
+            GetColumnTimestamps("row1", "col2"));  // was 3, keeps all 3
+  EXPECT_EQ((std::set<std::chrono::milliseconds>{200_ms, 100_ms}),
+            GetColumnTimestamps("row2", "col1"));  // was 2, keeps all 2
+  EXPECT_EQ((std::set<std::chrono::milliseconds>{300_ms}),
+            GetColumnTimestamps("row2", "col2"));  // was 1, keeps all 1
   // Total: 3+3+2+1 = 9 cells remaining
   EXPECT_EQ(9, CountTotalCells());
-}
-
-TEST_F(GCTest, MaxNumVersionsZeroVersionsRemovesAll) {
-  AddTestData();
-  EXPECT_EQ(11, CountTotalCells());
-
-  google::bigtable::admin::v2::GcRule gc_rule;
-  gc_rule.set_max_num_versions(0);
-  cf_->SetGCRule(gc_rule);
-
-  auto status = cf_->RunGC();
-  EXPECT_TRUE(status.ok());
-  EXPECT_EQ(0, CountTotalCells());
-}
-
-TEST_F(GCTest, MaxNumVersionsNegativeVersionsReturnsError) {
-  AddTestData();
-
-  google::bigtable::admin::v2::GcRule gc_rule;
-  gc_rule.set_max_num_versions(-1);
-  cf_->SetGCRule(gc_rule);
-
-  auto status = cf_->RunGC();
-  EXPECT_THAT(status, StatusIs(StatusCode::kInvalidArgument));
 }
 
 TEST_F(GCTest, MaxAgeRemovesOldCells) {
@@ -157,13 +149,11 @@ TEST_F(GCTest, MaxAgeRemovesOldCells) {
   max_age->set_seconds(3600);  // 1 hour max age
   max_age->set_nanos(0);
   cf_->SetGCRule(gc_rule);
-
-  auto status = cf_->RunGC();
-  EXPECT_TRUE(status.ok());
+  cf_->RunGC();
 
   EXPECT_EQ(1, CountTotalCells());
-  EXPECT_EQ(1, CountCellsInColumn("row1", "col1"));
-  EXPECT_EQ(0, CountCellsInColumn("row1", "col2"));
+  EXPECT_EQ((std::set<std::chrono::milliseconds>{recent_time}),
+            GetColumnTimestamps("row1", "col1"));
 }
 
 TEST_F(GCTest, MaxAgeKeepsRecentCells) {
@@ -186,38 +176,9 @@ TEST_F(GCTest, MaxAgeKeepsRecentCells) {
   max_age->set_seconds(3600);  // 1 hour max age
   max_age->set_nanos(0);
   cf_->SetGCRule(gc_rule);
-
-  auto status = cf_->RunGC();
-  EXPECT_TRUE(status.ok());
+  cf_->RunGC();
 
   EXPECT_EQ(2, CountTotalCells());
-}
-
-TEST_F(GCTest, MaxAgeWithNanoseconds) {
-  auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-      std::chrono::system_clock::now().time_since_epoch());
-
-  // Use clear separation: 24 hours old vs 30 minutes old
-  auto old_time =
-      now - std::chrono::milliseconds(24LL * 60 * 60 * 1000);  // 24 hours ago
-  auto recent_time =
-      now - std::chrono::milliseconds(30 * 60 * 1000);  // 30 minutes ago
-
-  cf_->SetCell("row1", "col1", old_time, "old_value");
-  cf_->SetCell("row1", "col1", recent_time, "recent_value");
-
-  EXPECT_EQ(2, CountTotalCells());
-
-  google::bigtable::admin::v2::GcRule gc_rule;
-  auto* max_age = gc_rule.mutable_max_age();
-  max_age->set_seconds(3600);     // 1 hour max age
-  max_age->set_nanos(500000000);  // Test nanoseconds precision
-  cf_->SetGCRule(gc_rule);
-
-  auto status = cf_->RunGC();
-  EXPECT_TRUE(status.ok());
-
-  EXPECT_EQ(1, CountTotalCells());
 }
 
 TEST_F(GCTest, IntersectionAllRulesMustMatch) {
@@ -236,15 +197,21 @@ TEST_F(GCTest, IntersectionAllRulesMustMatch) {
   max_age->set_nanos(0);
 
   cf_->SetGCRule(gc_rule);
-
-  auto status = cf_->RunGC();
-  EXPECT_TRUE(status.ok());
+  cf_->RunGC();
 
   // Intersection: cell removed ONLY if ALL rules would remove it
   // max_num_versions(3): keeps 3 newest per column (9 total)
   // max_age(30s): removes all cells (test data is very old, near Unix epoch)
   // Result: cells kept by max_num_versions are preserved (9 cells)
   EXPECT_EQ(9, CountTotalCells());
+  EXPECT_EQ((std::set<std::chrono::milliseconds>{500_ms, 400_ms, 300_ms}),
+            GetColumnTimestamps("row1", "col1"));
+  EXPECT_EQ((std::set<std::chrono::milliseconds>{350_ms, 250_ms, 150_ms}),
+            GetColumnTimestamps("row1", "col2"));
+  EXPECT_EQ((std::set<std::chrono::milliseconds>{200_ms, 100_ms}),
+            GetColumnTimestamps("row2", "col1"));
+  EXPECT_EQ((std::set<std::chrono::milliseconds>{300_ms}),
+            GetColumnTimestamps("row2", "col2"));
 }
 
 TEST_F(GCTest, IntersectionEmptyRulesKeepsAll) {
@@ -254,9 +221,7 @@ TEST_F(GCTest, IntersectionEmptyRulesKeepsAll) {
   google::bigtable::admin::v2::GcRule gc_rule;
   gc_rule.mutable_intersection();
   cf_->SetGCRule(gc_rule);
-
-  auto status = cf_->RunGC();
-  EXPECT_TRUE(status.ok());
+  cf_->RunGC();
   EXPECT_EQ(11, CountTotalCells());
 }
 
@@ -286,14 +251,16 @@ TEST_F(GCTest, UnionAnyRuleMatches) {
   max_age->set_nanos(0);
 
   cf_->SetGCRule(gc_rule);
-
-  auto status = cf_->RunGC();
-  EXPECT_TRUE(status.ok());
+  cf_->RunGC();
 
   // Union: cell removed if ANY rule would remove it
   // Old cells removed by max_age, recent cells survive both rules
   // Recent cells: pass max_age and there's only 1 per column (≤2)
   EXPECT_EQ(2, CountTotalCells());
+  EXPECT_EQ((std::set<std::chrono::milliseconds>{recent_time}),
+            GetColumnTimestamps("row3", "col1"));
+  EXPECT_EQ((std::set<std::chrono::milliseconds>{recent_time}),
+            GetColumnTimestamps("row3", "col2"));
 }
 
 TEST_F(GCTest, UnionEmptyRulesKeepsAll) {
@@ -303,9 +270,8 @@ TEST_F(GCTest, UnionEmptyRulesKeepsAll) {
   google::bigtable::admin::v2::GcRule gc_rule;
   gc_rule.mutable_union_();
   cf_->SetGCRule(gc_rule);
+  cf_->RunGC();
 
-  auto status = cf_->RunGC();
-  EXPECT_TRUE(status.ok());
   EXPECT_EQ(11, CountTotalCells());
 }
 
@@ -338,15 +304,23 @@ TEST_F(GCTest, NestedRulesIntersectionOfUnions) {
   max_age2->set_nanos(0);
 
   cf_->SetGCRule(gc_rule);
-
-  auto status = cf_->RunGC();
-  EXPECT_TRUE(status.ok());
+  cf_->RunGC();
 
   // We expect only the v1 and v2 cells in row1 to be deleted (They
   // are the only ones that are > 25ms of age AND in a column where it
   // is not among the most recent 3 OR the most recent 4). Therefore
   // from 12 cells, we expect 10 to survive the GC.
   EXPECT_EQ(10, CountTotalCells());
+  EXPECT_EQ((std::set<std::chrono::milliseconds>{500_ms, 400_ms, 300_ms}),
+            GetColumnTimestamps("row1", "col1"));
+  EXPECT_EQ((std::set<std::chrono::milliseconds>{350_ms, 250_ms, 150_ms}),
+            GetColumnTimestamps("row1", "col2"));
+  EXPECT_EQ((std::set<std::chrono::milliseconds>{200_ms, 100_ms}),
+            GetColumnTimestamps("row2", "col1"));
+  EXPECT_EQ((std::set<std::chrono::milliseconds>{300_ms}),
+            GetColumnTimestamps("row2", "col2"));
+  EXPECT_EQ((std::set<std::chrono::milliseconds>{recent_time}),
+            GetColumnTimestamps("row4", "col1"));
 }
 
 TEST_F(GCTest, NestedRulesUnionOfIntersections) {
@@ -379,88 +353,30 @@ TEST_F(GCTest, NestedRulesUnionOfIntersections) {
   max_age2->set_nanos(0);
 
   cf_->SetGCRule(gc_rule);
+  cf_->RunGC();
 
-  auto status = cf_->RunGC();
-  EXPECT_TRUE(status.ok());
-
-  // We expect v1, v2, v3, v6 and v9 to be deleted, leaving 9.
+  // We expect v1, v2, v3 and v6 to be deleted, leaving 9.
   EXPECT_EQ(9, CountTotalCells());
-}
-
-TEST_F(GCTest, InvalidRuleUnsetRule) {
-  AddTestData();
-
-  google::bigtable::admin::v2::GcRule gc_rule;
-  cf_->SetGCRule(gc_rule);
-
-  auto status = cf_->RunGC();
-  EXPECT_THAT(status, StatusIs(StatusCode::kInvalidArgument));
+  EXPECT_EQ((std::set<std::chrono::milliseconds>{500_ms, 400_ms}),
+            GetColumnTimestamps("row1", "col1"));
+  EXPECT_EQ((std::set<std::chrono::milliseconds>{350_ms, 250_ms}),
+            GetColumnTimestamps("row1", "col2"));
+  EXPECT_EQ((std::set<std::chrono::milliseconds>{200_ms, 100_ms}),
+            GetColumnTimestamps("row2", "col1"));
+  EXPECT_EQ((std::set<std::chrono::milliseconds>{300_ms}),
+            GetColumnTimestamps("row2", "col2"));
+  EXPECT_EQ((std::set<std::chrono::milliseconds>{recent_time}),
+            GetColumnTimestamps("row5", "col1"));
+  EXPECT_EQ((std::set<std::chrono::milliseconds>{recent_time}),
+            GetColumnTimestamps("row5", "col2"));
 }
 
 TEST_F(GCTest, NoGCRuleNoGarbageCollection) {
   AddTestData();
   EXPECT_EQ(11, CountTotalCells());
 
-  auto status = cf_->RunGC();
-  EXPECT_TRUE(status.ok());
+  cf_->RunGC();
   EXPECT_EQ(11, CountTotalCells());
-}
-
-TEST_F(GCTest, LargeGCRuleSizeLimit) {
-  google::bigtable::admin::v2::GcRule large_rule;
-  auto* union_rule = large_rule.mutable_union_();
-
-  for (int i = 0; i < 200; ++i) {
-    union_rule->add_rules()->set_max_num_versions(i + 1);
-  }
-
-  auto cf_result =
-      ColumnFamily::ConstructColumnFamily(absl::nullopt, large_rule);
-  EXPECT_THAT(cf_result, StatusIs(StatusCode::kInvalidArgument));
-}
-
-TEST_F(GCTest, GCRuleEraseVerdictMaxNumVersions) {
-  AddTestData();
-
-  google::bigtable::admin::v2::GcRule gc_rule;
-  gc_rule.set_max_num_versions(2);
-  cf_->SetGCRule(gc_rule);
-
-  auto status = cf_->RunGC();
-  EXPECT_TRUE(status.ok());
-
-  // Each column keeps its 2 newest cells (or all if it has ≤2)
-  EXPECT_EQ(2, CountCellsInColumn("row1", "col1"));  // was 5, keeps 2 newest
-  EXPECT_EQ(2, CountCellsInColumn("row1", "col2"));  // was 3, keeps 2 newest
-  EXPECT_EQ(2, CountCellsInColumn("row2", "col1"));  // was 2, keeps all 2
-  EXPECT_EQ(1, CountCellsInColumn("row2", "col2"));  // was 1, keeps all 1
-  // Total: 2+2+2+1 = 7 cells remaining
-  EXPECT_EQ(7, CountTotalCells());
-}
-
-TEST_F(GCTest, GCRuleEraseVerdictMaxAge) {
-  auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-      std::chrono::system_clock::now().time_since_epoch());
-
-  // Use 24-hour margin for old cells, 30 minutes for recent
-  cf_->SetCell("row1", "col1",
-               now - std::chrono::milliseconds(24LL * 60 * 60 * 1000), "old1");
-  cf_->SetCell("row1", "col1", now - std::chrono::milliseconds(30 * 60 * 1000),
-               "recent1");
-  cf_->SetCell("row1", "col2",
-               now - std::chrono::milliseconds(24LL * 60 * 60 * 1000), "old2");
-
-  google::bigtable::admin::v2::GcRule gc_rule;
-  auto* max_age = gc_rule.mutable_max_age();
-  max_age->set_seconds(3600);  // 1 hour max age
-  max_age->set_nanos(0);
-  cf_->SetGCRule(gc_rule);
-
-  auto status = cf_->RunGC();
-  EXPECT_TRUE(status.ok());
-
-  EXPECT_EQ(1, CountCellsInColumn("row1", "col1"));
-  EXPECT_EQ(0, CountCellsInColumn("row1", "col2"));
 }
 
 TEST_F(GCTest, EmptyColumnFamilyGCDoesNothing) {
@@ -469,9 +385,8 @@ TEST_F(GCTest, EmptyColumnFamilyGCDoesNothing) {
   google::bigtable::admin::v2::GcRule gc_rule;
   gc_rule.set_max_num_versions(1);
   cf_->SetGCRule(gc_rule);
+  cf_->RunGC();
 
-  auto status = cf_->RunGC();
-  EXPECT_TRUE(status.ok());
   EXPECT_EQ(0, CountTotalCells());
 }
 
@@ -482,23 +397,9 @@ TEST_F(GCTest, SingleCellMaxVersionsOne) {
   google::bigtable::admin::v2::GcRule gc_rule;
   gc_rule.set_max_num_versions(1);
   cf_->SetGCRule(gc_rule);
+  cf_->RunGC();
 
-  auto status = cf_->RunGC();
-  EXPECT_TRUE(status.ok());
   EXPECT_EQ(1, CountTotalCells());
-}
-
-TEST_F(GCTest, ColumnFamilyRowGCPropagatesErrors) {
-  AddTestData();
-
-  auto row_it = cf_->find("row1");
-  ASSERT_NE(row_it, cf_->end());
-
-  google::bigtable::admin::v2::GcRule gc_rule;
-  gc_rule.set_max_num_versions(-5);
-
-  auto status = row_it->second.RunGC(gc_rule);
-  EXPECT_THAT(status, StatusIs(StatusCode::kInvalidArgument));
 }
 
 TEST_F(GCTest, ColumnRowGCDirect) {
@@ -513,42 +414,10 @@ TEST_F(GCTest, ColumnRowGCDirect) {
 
   google::bigtable::admin::v2::GcRule gc_rule;
   gc_rule.set_max_num_versions(3);
-
-  auto status = col_it->second.RunGC(gc_rule);
-  EXPECT_TRUE(status.ok());
+  col_it->second.RunGC(gc_rule);
 
   EXPECT_EQ(3, static_cast<int>(std::distance(col_it->second.begin(),
                                               col_it->second.end())));
-}
-
-TEST_F(GCTest, IntersectionWithInvalidRuleReturnsError) {
-  AddTestData();
-
-  google::bigtable::admin::v2::GcRule gc_rule;
-  auto* intersection = gc_rule.mutable_intersection();
-
-  intersection->add_rules()->set_max_num_versions(3);
-  intersection->add_rules()->set_max_num_versions(-1);
-
-  cf_->SetGCRule(gc_rule);
-
-  auto status = cf_->RunGC();
-  EXPECT_THAT(status, StatusIs(StatusCode::kInvalidArgument));
-}
-
-TEST_F(GCTest, UnionWithInvalidRuleReturnsError) {
-  AddTestData();
-
-  google::bigtable::admin::v2::GcRule gc_rule;
-  auto* union_rule = gc_rule.mutable_union_();
-
-  union_rule->add_rules()->set_max_num_versions(3);
-  union_rule->add_rules()->set_max_num_versions(-1);
-
-  cf_->SetGCRule(gc_rule);
-
-  auto status = cf_->RunGC();
-  EXPECT_THAT(status, StatusIs(StatusCode::kInvalidArgument));
 }
 
 TEST_F(GCTest, DeepNestingHandlesRecursion) {
@@ -565,56 +434,12 @@ TEST_F(GCTest, DeepNestingHandlesRecursion) {
   current->set_max_num_versions(2);
 
   cf_->SetGCRule(gc_rule);
-
-  auto status = cf_->RunGC();
-  EXPECT_TRUE(status.ok());
-
+  EXPECT_EQ(11, CountTotalCells());
+  cf_->RunGC();
+  EXPECT_EQ(11, CountTotalCells());
+  // The GC deleted nothing because some of the intersected
+  // rules are empty intersections which do NOT delete anything.
   EXPECT_EQ(5, CountCellsInColumn("row1", "col1"));
-}
-
-// The proto stadard requires max_age duration to be at least 1ms.
-TEST_F(GCTest, MaxAgeZeroDurationReturnsAnErrorStatus) {
-  AddTestData();
-  EXPECT_EQ(11, CountTotalCells());
-
-  google::bigtable::admin::v2::GcRule gc_rule;
-  auto* max_age = gc_rule.mutable_max_age();
-  max_age->set_seconds(0);
-  max_age->set_nanos(0);
-  cf_->SetGCRule(gc_rule);
-
-  auto status = cf_->RunGC();
-  EXPECT_FALSE(status.ok());
-  EXPECT_EQ(11, CountTotalCells());
-}
-
-// The proto stadard requires max_age duration to be at least 1ms.
-TEST_F(GCTest, MaxAgeLessThan1msDurationReturnsErrorStatus) {
-  AddTestData();
-  EXPECT_EQ(11, CountTotalCells());
-
-  google::bigtable::admin::v2::GcRule gc_rule;
-  auto* max_age = gc_rule.mutable_max_age();
-  max_age->set_seconds(0);
-  max_age->set_nanos(999000);  // 0.999ms
-  cf_->SetGCRule(gc_rule);
-
-  auto status = cf_->RunGC();
-  EXPECT_FALSE(status.ok());
-  EXPECT_EQ(11, CountTotalCells());
-}
-
-TEST_F(GCTest, MaxAgeNegativeDurationReturnsError) {
-  AddTestData();
-
-  google::bigtable::admin::v2::GcRule gc_rule;
-  auto* max_age = gc_rule.mutable_max_age();
-  max_age->set_seconds(-1);
-  max_age->set_nanos(0);
-  cf_->SetGCRule(gc_rule);
-
-  auto status = cf_->RunGC();
-  EXPECT_THAT(status, StatusIs(StatusCode::kInvalidArgument));
 }
 
 TEST_F(GCTest, MaxNumVersionsVeryLarge) {
@@ -624,9 +449,8 @@ TEST_F(GCTest, MaxNumVersionsVeryLarge) {
   google::bigtable::admin::v2::GcRule gc_rule;
   gc_rule.set_max_num_versions(1000000);  // Very large number
   cf_->SetGCRule(gc_rule);
+  cf_->RunGC();
 
-  auto status = cf_->RunGC();
-  EXPECT_TRUE(status.ok());
   EXPECT_EQ(11, CountTotalCells());  // Should keep all cells
 }
 
@@ -653,24 +477,104 @@ TEST_F(GCTest, MaxAgeBoundaryCondition) {
   max_age->set_seconds(3600);  // 1 hour
   max_age->set_nanos(0);
   cf_->SetGCRule(gc_rule);
-
-  auto status = cf_->RunGC();
-  EXPECT_TRUE(status.ok());
+  cf_->RunGC();
 
   // The two recent cells (50min and 10sec old) should remain
   EXPECT_EQ(2, CountTotalCells());
+  EXPECT_EQ((std::set<std::chrono::milliseconds>{very_recent,
+                                                 clearly_under_1_hour_ago}),
+            GetColumnTimestamps("row1", "col1"));
 }
 
-TEST_F(GCTest, DebugSimpleMaxVersions) {
-  AddTestData();
+// FIXME: Write some concurrency tests once garbage collections starts taking
+// more granular locks instead of the table ones.
 
+TEST(GCRuleTest, UnsetRuleIsValid) {
   google::bigtable::admin::v2::GcRule gc_rule;
-  gc_rule.set_max_num_versions(2);
-  cf_->SetGCRule(gc_rule);
+  auto status = CheckGCRuleIsValid(gc_rule);
+  EXPECT_STATUS_OK(status);
+}
 
-  auto status = cf_->RunGC();
-  EXPECT_TRUE(status.ok());
-  EXPECT_EQ(2, CountCellsInColumn("row1", "col1"));
+TEST(GCRuleTest, EmptyIntersectionIsValid) {
+  google::bigtable::admin::v2::GcRule gc_rule;
+  gc_rule.mutable_intersection();
+  auto status = CheckGCRuleIsValid(gc_rule);
+  EXPECT_STATUS_OK(status);
+}
+
+TEST(GCRuleTest, EmptyUnionIsValid) {
+  google::bigtable::admin::v2::GcRule gc_rule;
+  gc_rule.mutable_union_();
+  auto status = CheckGCRuleIsValid(gc_rule);
+  EXPECT_STATUS_OK(status);
+}
+
+TEST(GCRuleTest, MaxNumVersionsLessThanOneIsInvalid) {
+  for (auto max_versions : {INT32_MIN, -1, 0}) {
+    google::bigtable::admin::v2::GcRule gc_rule;
+    gc_rule.set_max_num_versions(max_versions);
+    auto status = CheckGCRuleIsValid(gc_rule);
+    EXPECT_THAT(status, StatusIs(StatusCode::kInvalidArgument));
+  }
+}
+
+TEST(GCRuleTest, MaxAgeNegativeDurationIsInvalid) {
+  google::bigtable::admin::v2::GcRule gc_rule;
+  auto* max_age = gc_rule.mutable_max_age();
+  max_age->set_seconds(-1);
+  max_age->set_nanos(0);
+  auto status = CheckGCRuleIsValid(gc_rule);
+  EXPECT_THAT(status, StatusIs(StatusCode::kInvalidArgument));
+}
+
+// The proto definition requires max_age duration to be at least 1ms.
+TEST(GCRuleTest, MaxAgeShorterThanOneMillisecondIsInvalid) {
+  google::bigtable::admin::v2::GcRule gc_rule;
+  auto* max_age = gc_rule.mutable_max_age();
+  max_age->set_seconds(0);
+  max_age->set_nanos(999999);
+  auto status = CheckGCRuleIsValid(gc_rule);
+  EXPECT_THAT(status, StatusIs(StatusCode::kInvalidArgument));
+}
+
+TEST(GCRuleTest, MaxAgeOfExactlyOneMillisecondIsValid) {
+  google::bigtable::admin::v2::GcRule gc_rule;
+  auto* max_age = gc_rule.mutable_max_age();
+  max_age->set_seconds(0);
+  max_age->set_nanos(1000000);
+  auto status = CheckGCRuleIsValid(gc_rule);
+  EXPECT_STATUS_OK(status);
+}
+
+TEST(GCRuleTest, IntersectionWithInvalidRuleIsInvalid) {
+  google::bigtable::admin::v2::GcRule gc_rule;
+  auto* intersection = gc_rule.mutable_intersection();
+  intersection->add_rules()->set_max_num_versions(3);
+  intersection->add_rules()->set_max_num_versions(-1);
+  auto status = CheckGCRuleIsValid(gc_rule);
+  EXPECT_THAT(status, StatusIs(StatusCode::kInvalidArgument));
+}
+
+TEST(GCRuleTest, UnionWithInvalidRuleIsInvalid) {
+  google::bigtable::admin::v2::GcRule gc_rule;
+  auto* union_rule = gc_rule.mutable_union_();
+  union_rule->add_rules()->set_max_num_versions(3);
+  union_rule->add_rules()->set_max_num_versions(-1);
+  auto status = CheckGCRuleIsValid(gc_rule);
+  EXPECT_THAT(status, StatusIs(StatusCode::kInvalidArgument));
+}
+
+TEST(GCRuleTest, TooLargeGCRuleIsInvalid) {
+  google::bigtable::admin::v2::GcRule large_rule;
+  auto* union_rule = large_rule.mutable_union_();
+
+  for (int i = 0; i < 200; ++i) {
+    union_rule->add_rules()->set_max_num_versions(i + 1);
+  }
+
+  auto cf_result =
+      ColumnFamily::ConstructColumnFamily(absl::nullopt, large_rule);
+  EXPECT_THAT(cf_result, StatusIs(StatusCode::kInvalidArgument));
 }
 
 }  // namespace
