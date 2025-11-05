@@ -6,15 +6,6 @@ It should pass all the integration tests in Google's C++ client
 repository (google-cloud-cpp), except those that must run against
 production Bigtable.
 
-## Development
-
-It's a good idea to set home (`$HOME/.bazelrc` on Unixes) or system `bazelrc`
-and enable compilation cache there with this line:
-```
-build --disk_cache=~/.cache/bazel/disk-cache
-```
-Note that the cache directory grows indefinitely.
-
 ## Dependencies
 
 The Bigtable-emulator depends on `google-cloud-cpp` (which the build
@@ -50,13 +41,22 @@ bigtable-emulator -p <port>
 
 ## Development
 
+It's a good idea to set home (`$HOME/.bazelrc` on Unixes) or system `bazelrc`
+and enable compilation cache there with this line:
+```
+build --disk_cache=~/.cache/bazel/disk-cache
+```
+Note that the cache directory grows indefinitely.
+
 ### Formatting the code
+
 ```bash
 # On bash you neet to enable globstar with `shopt -s globstar` first
 clang-format -i -style=file -assume-filename=.clang-format **/*.cc **/*.h
 ```
 
 ### `compile_commands.json`
+
 If you need to generate `compile_commands.json` for your tooling, run:
 ```shell
 bazel run --config=compile-commands
