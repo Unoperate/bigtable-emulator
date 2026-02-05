@@ -1,0 +1,48 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build Project",
+      "type": "shell",
+      "command": "/opt/homebrew/Cellar/bazel/8.5.0/libexec/bin/bazel-7.6.1-darwin-arm64 build //...",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Run Tests",
+      "type": "shell",
+      "command": "/opt/homebrew/Cellar/bazel/8.5.0/libexec/bin/bazel-7.6.1-darwin-arm64 test //...",
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "Run Emulator",
+      "type": "shell",
+      "command": "rm -rf /tmp/rocksdb-for-bigtable-test4 && /opt/homebrew/Cellar/bazel/8.5.0/libexec/bin/bazel-7.6.1-darwin-arm64 run :emulator -- --host=127.0.0.1 --port=8888",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Run Emulator (Debug)",
+      "type": "shell",
+      "command": "rm -rf /tmp/rocksdb-for-bigtable-test4 && /opt/homebrew/Cellar/bazel/8.5.0/libexec/bin/bazel-7.6.1-darwin-arm64 run :emulator --compilation_mode dbg --sandbox_debug --verbose_failures -- --host=127.0.0.1 --port=8888",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Clean RocksDB Storage",
+      "type": "shell",
+      "command": "rm -rf /tmp/rocksdb-for-bigtable-test4",
+      "problemMatcher": []
+    },
+    {
+      "label": "Clean Build",
+      "type": "shell",
+      "command": "/opt/homebrew/Cellar/bazel/8.5.0/libexec/bin/bazel-7.6.1-darwin-arm64 clean",
+      "problemMatcher": []
+    }
+  ]
+}

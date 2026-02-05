@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+import "google/bigtable/admin/v2/table.proto";
+import "google/bigtable/admin/v2/types.proto";
+import "google/protobuf/timestamp.proto";
+
+package storage;
+
+message StorageRocksDBConfig {
+  string db_path = 1;
+  string meta_column_family = 2;
+}
+
+message RowColumnData {
+  map<int64, string> cells = 1;
+}
+
+message RowData {
+  RowColumnData column = 1;
+}
+
+message TableMeta {
+  google.bigtable.admin.v2.Table table = 1;
+}

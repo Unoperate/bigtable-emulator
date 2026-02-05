@@ -13,6 +13,8 @@
 // limitations under the License.
 
 #include "server.h"
+#include "persist/rocksdb/storage.h"
+#include "persist/utils/test_utils.h"
 #include "google/cloud/testing_util/status_matchers.h"
 #include <google/bigtable/admin/v2/bigtable_table_admin.grpc.pb.h>
 #include <google/bigtable/admin/v2/bigtable_table_admin.pb.h>
@@ -39,9 +41,12 @@ class ServerTest : public ::testing::Test {
   std::unique_ptr<EmulatorServer> server_;
   std::shared_ptr<grpc::Channel> channel_;
   grpc::ClientContext ctx_;
+  std::shared_ptr<RocksDBStorage> storage_;
 
   void SetUp() override {
-    auto maybe_server = CreateDefaultEmulatorServer("127.0.0.1", 0);
+    RocksDBStorageTestManager m;
+    storage_ = std::move(m.getStorage());
+    auto maybe_server = CreateDefaultEmulatorServer("127.0.0.1", 0, storage_);
     ASSERT_STATUS_OK(maybe_server);
     server_ = std::move(maybe_server.value());
     channel_ = grpc::CreateChannel(
@@ -227,7 +232,9 @@ TEST_F(ServerTest, TableAdminUpdateTable) {
 
 // Test that the failure path for server creation does not crash.
 TEST(ServerCreationTest, TestServerCreationFailurePath) {
-  auto maybe_server = CreateDefaultEmulatorServer("invalid_host_address", 0);
+  RocksDBStorageTestManager m;
+  auto storage = m.getStorage();
+  auto maybe_server = CreateDefaultEmulatorServer("invalid_host_address", 0, storage);
   ASSERT_EQ(false, maybe_server.ok());
 }
 

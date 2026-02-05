@@ -352,6 +352,17 @@ StatusOr<std::reference_wrapper<ColumnFamily>> Table::FindColumnFamily(
   return std::ref(*column_family_it->second);
 }
 
+StatusOr<std::reference_wrapper<ColumnFamily>> Table::FindColumnFamily(
+    std::string const& message) const {
+  auto column_family_it = column_families_.find(message);
+  if (column_family_it == column_families_.end()) {
+    return NotFoundError(
+        "No such column family.",
+        GCP_ERROR_INFO().WithMetadata("mutation", message));
+  }
+  return std::ref(*column_family_it->second);
+}
+
 Status Table::MutateRow(google::bigtable::v2::MutateRowRequest const& request) {
   std::lock_guard<std::mutex> lock(mu_);
 
@@ -525,7 +536,7 @@ std::vector<CellStream> FilteredTableStream::CreateCellStreams(
   return res;
 }
 
-StatusOr<StringRangeSet> CreateStringRangeSet(
+static inline StatusOr<StringRangeSet> CreateStringRangeSet(
     google::bigtable::v2::RowSet const& row_set) {
   StringRangeSet res;
   for (auto const& row_key : row_set.row_keys()) {

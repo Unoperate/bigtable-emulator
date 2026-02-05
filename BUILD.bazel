@@ -15,8 +15,28 @@
 load(":bigtable_emulator_common.bzl", "bigtable_emulator_common_hdrs", "bigtable_emulator_common_srcs")
 load(":bigtable_emulator_programs.bzl", "bigtable_emulator_programs")
 load(":bigtable_emulator_test_common.bzl", "bigtable_emulator_test_common_hdrs", "bigtable_emulator_test_common_srcs")
-load(":bigtable_emulator_unit_tests.bzl", "bigtable_emulator_unit_tests")
+load(":bigtable_emulator_unit_tests.bzl", "bigtable_emulator_unit_tests", "bigtable_emulator_unit_tests_common")
 load(":funcs.bzl", "gen_cc_tests")
+
+proto_library(
+    name = "storage_protos",
+    srcs = [
+        "persist/proto/storage.proto",
+    ],
+    deps = [
+        "@com_google_googleapis//google/bigtable/admin/v2:admin_proto",
+        "@com_google_protobuf//:duration_proto",
+        "@com_google_protobuf//:empty_proto",
+        "@com_google_protobuf//:field_mask_proto",
+        "@com_google_protobuf//:timestamp_proto",
+    ],
+)
+
+cc_proto_library(
+  name = "storage_cc_protos",
+  deps = [":storage_protos"],
+)
+
 
 cc_library(
     name = "bigtable_emulator_common",
@@ -24,6 +44,10 @@ cc_library(
     hdrs = bigtable_emulator_common_hdrs,
     deps = [
         "@google_cloud_cpp//google/cloud/bigtable:google_cloud_cpp_bigtable",
+        "@rocksdb//:rocksdb",
+        "@fmtlog",
+        "@fmt",
+        ":storage_cc_protos",
     ],
 )
 
@@ -44,6 +68,7 @@ cc_binary(
 
 gen_cc_tests(
     srcs = bigtable_emulator_unit_tests,
+    common = bigtable_emulator_unit_tests_common,
     deps = [
         ":bigtable_emulator_common",
         "@com_github_grpc_grpc//:grpc",

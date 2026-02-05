@@ -13,7 +13,6 @@
 # limitations under the License.
 
 """Bigtable Emulator."""
-
 module(
     name = "bigtable_emulator",
     version = "1.0",
@@ -80,6 +79,27 @@ git_repository(
     patches = ["//bazel:google_cloud_cpp.patch"],
     patch_args = ["-p1"],
 )
+
+# fmtlog is required for utils/logging.h
+# fmtlog uses fmt under the hood
+bazel_dep(name = "fmt", version = "12.1.0")
+git_repository(
+    name = "fmtlog",
+    remote = "https://github.com/MengRao/fmtlog.git",
+    commit = "308b2317d4e9c21d3b203d104007fde127dcdbfa",
+    build_file_content = """
+cc_library(
+    name = "fmtlog",
+    visibility = ["//visibility:public"],
+    hdrs = glob(["*.h"]),
+    includes = glob(["*.h"]),
+    defines = [],
+    deps = ["@fmt"],
+)
+""",
+)
+
+bazel_dep(name = "rocksdb", version = "9.11.2")
 
 git_repository(
     name = "bazel_clang_tidy",

@@ -12,12 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-def gen_cc_tests(srcs, deps = [], copts = []):
+def gen_cc_tests(srcs, common, deps = [], copts = []):
     for src in srcs:
         test_name = src.replace("/", "_").replace(".cc", "")
         native.cc_test(
             name = test_name,
-            srcs = [src],
+            srcs = [src]+common,
             deps = deps,
             copts = copts,
         )
