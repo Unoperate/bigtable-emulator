@@ -1,6 +1,7 @@
-# Single Node, Memory Only Emulator for Google Bigtable
+# Single Node Emulator for Google Bigtable
 
-This is a single-node, non-persistent emulator for Google's Bigtable.
+This is a single-node emulator for Google's Bigtable with RocksDB-backed
+persistence.
 
 It should pass all the integration tests in Google's C++ client
 repository (google-cloud-cpp), except those that must run against
@@ -36,8 +37,25 @@ bazel build --config clang-tidy //...
 ## Running the Emulator
 
 ```shell
-bigtable-emulator -p <port>
+bazel run //:emulator -- --port=<port> [--host=<host>] [--db_path=<rocksdb_dir>]
 ```
+
+Defaults:
+
+- `host`: `localhost`
+- `port`: `8888`
+- `db_path`: `test_db`
+
+If `--db_path` points to an existing database directory, tables/schemas are
+loaded from that persisted state on startup.
+
+## Clearing Persisted Data
+
+```shell
+bazel run //:clear -- [<rocksdb_dir>]
+```
+
+If no path is provided, `clear` uses the default `test_db`.
 
 ## Development
 

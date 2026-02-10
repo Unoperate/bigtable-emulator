@@ -41,6 +41,7 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#include "storage.h"
 
 namespace google {
 namespace cloud {
@@ -161,6 +162,8 @@ class Table : public std::enable_shared_from_this<Table> {
   std::condition_variable cv_;
   std::thread gc_thread_;
 
+  std::string name_;
+
   void StartGCThread();
 };
 
@@ -173,6 +176,7 @@ struct RestoreValue {
 
 struct DeleteValue {
   ColumnFamily& column_family;
+  std::string family_name;
   std::string column_qualifier;
   std::chrono::milliseconds timestamp;
 };
@@ -180,8 +184,8 @@ struct DeleteValue {
 class RowTransaction {
  public:
   explicit RowTransaction(std::shared_ptr<Table> table,
-                          std::string const& row_key)
-      : row_key_(row_key) {
+                          std::string const& row_key, std::string table_name = "")
+      : row_key_(row_key), table_key_(table_name) {
     table_ = std::move(table);
     committed_ = false;
   };
@@ -228,6 +232,9 @@ class RowTransaction {
   // store a reference to it to avoid copying a potentially very large
   // (up to 4KB) value.
   std::string const& row_key_;
+  
+  // prefix + table name, i.e. projects/p/instances/i/tables/{table_name}
+  std::string table_key_;
 };
 
 google::bigtable::v2::ReadModifyWriteRowResponse
@@ -247,8 +254,14 @@ FamiliesToReadModifyWriteResponse(
  */
 class FilteredTableStream : public MergeCellStreams {
  public:
+  // FilteredTableStream() : MergeCellStreams({}) {}
+  
   explicit FilteredTableStream(
       std::vector<std::unique_ptr<FilteredColumnFamilyStream>> cf_streams)
+      : MergeCellStreams(CreateCellStreams(std::move(cf_streams))) {}
+  
+  explicit FilteredTableStream(
+      std::vector<std::unique_ptr<PersistentFilteredColumnFamilyStream>> cf_streams)
       : MergeCellStreams(CreateCellStreams(std::move(cf_streams))) {}
 
   bool ApplyFilter(InternalFilter const& internal_filter) override;
@@ -256,6 +269,8 @@ class FilteredTableStream : public MergeCellStreams {
  private:
   static std::vector<CellStream> CreateCellStreams(
       std::vector<std::unique_ptr<FilteredColumnFamilyStream>> cf_streams);
+  static std::vector<CellStream> CreateCellStreams(
+    std::vector<std::unique_ptr<PersistentFilteredColumnFamilyStream>> cf_streams);
 };
 
 }  // namespace emulator

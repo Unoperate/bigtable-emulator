@@ -19,11 +19,9 @@
 #include "absl/strings/match.h"
 #include "table.h"
 #include <google/bigtable/admin/v2/table.pb.h>
-#include <iostream>
 #include <map>
 #include <memory>
 #include <mutex>
-#include <ostream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -95,7 +93,6 @@ StatusOr<btadmin::Table> ApplyView(std::string const& table_name,
 StatusOr<btadmin::Table> Cluster::CreateTable(std::string const& table_name,
                                               btadmin::Table schema) {
   schema.set_name(table_name);
-  std::cout << "Creating table " << table_name << std::endl;
   auto maybe_table = Table::Create(std::move(schema));
   if (!maybe_table) {
     return maybe_table.status();
@@ -120,7 +117,6 @@ StatusOr<std::vector<btadmin::Table>> Cluster::ListTables(
   }
   std::vector<btadmin::Table> res;
   std::string const prefix = instance_name + "/tables/";
-  std::cout << "Listing tables with prefix " << prefix << std::endl;
   for (auto name_and_table_it = table_by_name_copy.upper_bound(prefix);
        name_and_table_it != table_by_name_copy.end() &&
        absl::StartsWith(name_and_table_it->first, prefix);
@@ -164,6 +160,10 @@ Status Cluster::DeleteTable(std::string const& table_name) {
           "The table has deletion protection.",
           GCP_ERROR_INFO().WithMetadata("table_name", table_name));
     }
+    Storage* storage = GetGlobalStorage();
+    if (storage != nullptr) {
+      storage->DeleteTable(table_name);
+    }
     table_by_name_.erase(it);
   }
   return Status();
@@ -186,6 +186,25 @@ StatusOr<std::shared_ptr<Table>> Cluster::FindTable(
     return it->second;
   }
 }
+
+Status Cluster::AttachTable(std::string const& table_name,
+                            std::shared_ptr<Table> table) {
+  if (!table) {
+    return google::cloud::internal::InvalidArgumentError(
+        "null table pointer",
+        GCP_ERROR_INFO().WithMetadata("table_name", table_name));
+  }
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!table_by_name_.emplace(table_name, std::move(table)).second) {
+      return google::cloud::internal::AlreadyExistsError(
+          "Table already exists.",
+          GCP_ERROR_INFO().WithMetadata("table_name", table_name));
+    }
+  }
+  return Status();
+}
+
 
 }  // namespace emulator
 }  // namespace bigtable

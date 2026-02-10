@@ -350,6 +350,7 @@ class DefaultEmulatorServer : public EmulatorServer {
   void Shutdown() override { server_->Shutdown(); }
   void Wait() override { server_->Wait(); }
   bool HasValidServer() { return static_cast<bool>(server_); }
+  std::shared_ptr<Cluster> cluster() override { return cluster_; }
 
  private:
   int bound_port_;

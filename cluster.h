@@ -104,6 +104,12 @@ class Cluster {
    */
   StatusOr<std::shared_ptr<Table>> FindTable(std::string const& table_name);
 
+  // Attach a pre-built table instance into the cluster registry.
+  // Returns an error if a table with the same name already exists.
+  Status AttachTable(std::string const& table_name,
+                     std::shared_ptr<Table> table);
+
+
  private:
   mutable std::mutex mu_;
 

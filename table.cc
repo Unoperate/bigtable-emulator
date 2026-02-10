@@ -47,13 +47,52 @@
 #include <map>
 #include <memory>
 #include <mutex>
-#include <ostream>
 #include <stack>
 #include <string>
 #include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
+#include <atomic>
+#include <sstream>
+#include "storage.h"
+#include "constants.h"
+
+void store_schema(const google::bigtable::admin::v2::Table& schema) {
+  auto* storage = google::cloud::bigtable::emulator::GetGlobalStorage();
+  if (storage == nullptr) return;
+  std::string table_key;
+  table_key = kTablesPrefix + schema.name();
+  std::string value = schema.SerializeAsString();
+
+  std::string manifest = storage->GetRow(kManifestKey);
+  bool present = false;
+  if (!manifest.empty()) {
+    std::istringstream iss(manifest);
+    std::string line;
+    while (std::getline(iss, line)) {
+      if (google::cloud::bigtable::emulator::Trim(line) == table_key) {
+        present = true;
+        break;
+      }
+    }
+  }
+
+  std::vector<std::pair<std::string, std::string>> batch;
+  batch.emplace_back(table_key, value);
+
+  if (!present) {
+    std::string new_manifest = manifest;
+    if (!new_manifest.empty() && new_manifest.back() != '\n') new_manifest.push_back('\n');
+    new_manifest += table_key;
+    new_manifest.push_back('\n');
+    batch.emplace_back(kManifestKey, new_manifest);
+  }
+
+  if (!storage->PutBatch(batch)) {
+    std::cerr << "Failed to persist schema for key: " << table_key << std::endl;
+  }
+}
 
 namespace google {
 namespace cloud {
@@ -95,7 +134,6 @@ StatusOr<std::shared_ptr<Table>> Table::Create(
   }
 
   res->StartGCThreadOnce();
-
   return res;
 }
 
@@ -105,6 +143,7 @@ Status Table::Construct(google::bigtable::admin::v2::Table schema) {
   // this member function are reflected in other threads. The simplest way to do
   // this is the mutex.
   std::lock_guard<std::mutex> lock(mu_);
+  name_ = schema.name();
   schema_ = std::move(schema);
   if (schema_.granularity() ==
       btadmin::Table::TIMESTAMP_GRANULARITY_UNSPECIFIED) {
@@ -130,8 +169,15 @@ Status Table::Construct(google::bigtable::admin::v2::Table schema) {
         "`automated_backup_policy` not empty.",
         GCP_ERROR_INFO().WithMetadata("schema", schema_.DebugString()));
   }
-
+  auto normalized_schema = schema_;
+  normalized_schema.clear_column_families();
+  std::string const cf_prefix = name_ + "/";
   for (auto const& column_family_def : schema_.column_families()) {
+    auto column_family_id = column_family_def.first;
+    if (absl::StartsWith(column_family_id, cf_prefix)) {
+      column_family_id = column_family_id.substr(cf_prefix.size());
+    }
+
     absl::optional<google::bigtable::admin::v2::Type> opt_value_type =
         absl::nullopt;
     absl::optional<google::bigtable::admin::v2::GcRule> opt_gc_rule =
@@ -152,8 +198,12 @@ Status Table::Construct(google::bigtable::admin::v2::Table schema) {
       return cf.status();
     }
 
-    column_families_.emplace(column_family_def.first, cf.value());
+    (*normalized_schema.mutable_column_families())[column_family_id] =
+        column_family_def.second;
+    column_families_[column_family_id] = cf.value();
   }
+  schema_ = std::move(normalized_schema);
+  store_schema(schema_);
 
   return Status();
 }
@@ -161,11 +211,12 @@ Status Table::Construct(google::bigtable::admin::v2::Table schema) {
 // NOLINTBEGIN(readability-function-cognitive-complexity)
 StatusOr<btadmin::Table> Table::ModifyColumnFamilies(
     btadmin::ModifyColumnFamiliesRequest const& request) {
-  std::cout << "Modify column families: " << request.DebugString() << std::endl;
   std::unique_lock<std::mutex> lock(mu_);
   auto new_schema = schema_;
   auto new_column_families = column_families_;
   for (auto const& modification : request.modifications()) {
+    auto const& cf_id = modification.id();
+    std::string prefixed_cf_id = name_ + "/" + cf_id;
     if (modification.drop()) {
       if (IsDeleteProtectedNoLock()) {
         return FailedPreconditionError(
@@ -173,19 +224,23 @@ StatusOr<btadmin::Table> Table::ModifyColumnFamilies(
             GCP_ERROR_INFO().WithMetadata("modification",
                                           modification.DebugString()));
       }
-      if (new_column_families.erase(modification.id()) == 0) {
+      if (new_column_families.erase(cf_id) == 0) {
         return NotFoundError("No such column family.",
                              GCP_ERROR_INFO().WithMetadata(
                                  "modification", modification.DebugString()));
       }
-      if (new_schema.mutable_column_families()->erase(modification.id()) == 0) {
+      Storage* storage = GetGlobalStorage();
+      if (storage != nullptr) {
+        storage->DeleteColumnFamily(prefixed_cf_id);
+      }
+      if (new_schema.mutable_column_families()->erase(cf_id) == 0) {
         return InternalError("Column family with no schema.",
                              GCP_ERROR_INFO().WithMetadata(
                                  "modification", modification.DebugString()));
       }
     } else if (modification.has_update()) {
       auto& cfs = *new_schema.mutable_column_families();
-      auto cf_it = cfs.find(modification.id());
+      auto cf_it = cfs.find(cf_id);
       if (cf_it == cfs.end()) {
         return NotFoundError("No such column family.",
                              GCP_ERROR_INFO().WithMetadata(
@@ -241,12 +296,11 @@ StatusOr<btadmin::Table> Table::ModifyColumnFamilies(
           return status;
         }
 
-        auto it = new_column_families.find(modification.id());
+        auto it = new_column_families.find(cf_id);
         if (it == new_column_families.end()) {
           return InvalidArgumentError(
               "Attempt to modify Column Family that is not running",
-              GCP_ERROR_INFO().WithMetadata("Column Family",
-                                            modification.id()));
+              GCP_ERROR_INFO().WithMetadata("Column Family", cf_id));
         }
         it->second->SetGCRule(gc_rule);
       }
@@ -276,14 +330,14 @@ StatusOr<btadmin::Table> Table::ModifyColumnFamilies(
       }
       cf = std::move(maybe_cf.value());
 
-      if (!new_column_families.emplace(modification.id(), cf).second) {
+      if (!new_column_families.emplace(cf_id, cf).second) {
         return AlreadyExistsError(
             "Column family already exists.",
             GCP_ERROR_INFO().WithMetadata("modification",
                                           modification.DebugString()));
       }
       if (!new_schema.mutable_column_families()
-               ->emplace(modification.id(), modification.create())
+               ->emplace(cf_id, modification.create())
                .second) {
         return InternalError("Column family with schema but no data.",
                              GCP_ERROR_INFO().WithMetadata(
@@ -299,6 +353,7 @@ StatusOr<btadmin::Table> Table::ModifyColumnFamilies(
   // Defer destroying potentially large objects to after releasing the lock.
   column_families_.swap(new_column_families);
   schema_ = new_schema;
+  store_schema(schema_);
   lock.unlock();
   return new_schema;
 }
@@ -311,8 +366,6 @@ google::bigtable::admin::v2::Table Table::GetSchema() const {
 
 Status Table::Update(google::bigtable::admin::v2::Table const& new_schema,
                      google::protobuf::FieldMask const& to_update) {
-  std::cout << "Update schema: " << new_schema.DebugString()
-            << " mask: " << to_update.DebugString() << std::endl;
   using google::protobuf::util::FieldMaskUtil;
   google::protobuf::FieldMask allowed_mask;
   FieldMaskUtil::FromString(
@@ -337,6 +390,7 @@ Status Table::Update(google::bigtable::admin::v2::Table const& new_schema,
   std::lock_guard<std::mutex> lock(mu_);
   FieldMaskUtil::MergeMessageTo(new_schema, to_update,
                                 FieldMaskUtil::MergeOptions(), &schema_);
+  store_schema(schema_);
   return Status();
 }
 
@@ -344,6 +398,10 @@ template <typename MESSAGE>
 StatusOr<std::reference_wrapper<ColumnFamily>> Table::FindColumnFamily(
     MESSAGE const& message) const {
   auto column_family_it = column_families_.find(message.family_name());
+  if (column_family_it == column_families_.end()) {
+    // Backward compatibility for any already-loaded state using prefixed keys.
+    column_family_it = column_families_.find(name_ + "/" + message.family_name());
+  }
   if (column_family_it == column_families_.end()) {
     return NotFoundError(
         "No such column family.",
@@ -371,7 +429,7 @@ Status Table::DoMutationsWithPossibleRollback(
                                       absl::StrFormat("%zu", row_key.size())));
   }
 
-  RowTransaction row_transaction(this->get(), row_key);
+  RowTransaction row_transaction(this->get(), row_key, name_);
 
   for (auto const& mutation : mutations) {
     if (mutation.has_set_cell()) {
@@ -463,11 +521,27 @@ StatusOr<CellStream> Table::CreateCellStream(
     std::shared_ptr<StringRangeSet> range_set,
     absl::optional<google::bigtable::v2::RowFilter> maybe_row_filter) const {
   auto table_stream_ctor = [range_set = std::move(range_set), this] {
-    std::vector<std::unique_ptr<FilteredColumnFamilyStream>> per_cf_streams;
+    if (GetGlobalStorage() == nullptr) {
+      std::vector<std::unique_ptr<FilteredColumnFamilyStream>> per_cf_streams;
+      per_cf_streams.reserve(column_families_.size());
+      for (auto const& column_family : column_families_) {
+        per_cf_streams.emplace_back(std::make_unique<FilteredColumnFamilyStream>(
+            *column_family.second, column_family.first, range_set));
+      }
+      return CellStream(
+          std::make_unique<FilteredTableStream>(std::move(per_cf_streams)));
+    }
+
+    std::vector<std::unique_ptr<PersistentFilteredColumnFamilyStream>> per_cf_streams;
     per_cf_streams.reserve(column_families_.size());
+    std::string const cf_prefix = name_ + "/";
     for (auto const& column_family : column_families_) {
-      per_cf_streams.emplace_back(std::make_unique<FilteredColumnFamilyStream>(
-          *column_family.second, column_family.first, range_set));
+      auto storage_cf_name = column_family.first;
+      if (!absl::StartsWith(storage_cf_name, cf_prefix)) {
+        storage_cf_name = cf_prefix + storage_cf_name;
+      }
+      per_cf_streams.emplace_back(std::make_unique<PersistentFilteredColumnFamilyStream>(
+          name_, storage_cf_name, ""));
     }
     return CellStream(
         std::make_unique<FilteredTableStream>(std::move(per_cf_streams)));
@@ -485,38 +559,62 @@ bool FilteredTableStream::ApplyFilter(InternalFilter const& internal_filter) {
       !absl::holds_alternative<ColumnRange>(internal_filter)) {
     return MergeCellStreams::ApplyFilter(internal_filter);
   }
-  // internal_filter is either FamilyNameRegex or ColumnRange
+
   for (auto stream_it = unfinished_streams_.begin();
        stream_it != unfinished_streams_.end();) {
-    auto* cf_stream =
-        dynamic_cast<FilteredColumnFamilyStream*>(&(*stream_it)->impl());
-    assert(cf_stream);
 
+    AbstractCellStreamImpl& impl = (*stream_it)->impl();
+
+    // --- obtain column family name (RAM or persistent) ---
+    std::string const* cf_name = nullptr;
+
+    if (auto* ram =
+            dynamic_cast<FilteredColumnFamilyStream*>(&impl)) {
+      cf_name = &ram->column_family_name();
+    } else if (auto* persistent =
+                   dynamic_cast<PersistentFilteredColumnFamilyStream*>(&impl)) {
+      cf_name = &persistent->column_family_name();
+    } else {
+      assert(false && "Unknown column-family stream implementation");
+    }
+
+    // --- prune streams ---
     if ((absl::holds_alternative<FamilyNameRegex>(internal_filter) &&
          !re2::RE2::PartialMatch(
-             cf_stream->column_family_name(),
+             *cf_name,
              *absl::get<FamilyNameRegex>(internal_filter).regex)) ||
         (absl::holds_alternative<ColumnRange>(internal_filter) &&
-         absl::get<ColumnRange>(internal_filter).column_family !=
-             cf_stream->column_family_name())) {
+         absl::get<ColumnRange>(internal_filter).column_family != *cf_name)) {
       stream_it = unfinished_streams_.erase(stream_it);
       continue;
     }
 
-    if (absl::holds_alternative<ColumnRange>(internal_filter) &&
-        absl::get<ColumnRange>(internal_filter).column_family ==
-            cf_stream->column_family_name()) {
-      cf_stream->ApplyFilter(internal_filter);
+    // --- forward ColumnRange only to RAM stream (for now) ---
+    if (absl::holds_alternative<ColumnRange>(internal_filter)) {
+      if (auto* ram =
+              dynamic_cast<FilteredColumnFamilyStream*>(&impl)) {
+        ram->ApplyFilter(internal_filter);
+      }
+      // Persistent stream ignores it for now (correct, not a bug)
     }
 
-    stream_it++;
+    ++stream_it;
   }
 
   return true;
 }
-
 std::vector<CellStream> FilteredTableStream::CreateCellStreams(
     std::vector<std::unique_ptr<FilteredColumnFamilyStream>> cf_streams) {
+  std::vector<CellStream> res;
+  res.reserve(cf_streams.size());
+  for (auto& stream : cf_streams) {
+    res.emplace_back(std::move(stream));
+  }
+  return res;
+}
+
+std::vector<CellStream> FilteredTableStream::CreateCellStreams(
+    std::vector<std::unique_ptr<PersistentFilteredColumnFamilyStream>> cf_streams) {
   std::vector<CellStream> res;
   res.reserve(cf_streams.size());
   for (auto& stream : cf_streams) {
@@ -664,14 +762,6 @@ Status Table::ReadRows(google::bigtable::v2::ReadRowsRequest const& request,
 
   CellStream& stream = *maybe_stream;
   for (; stream; ++stream) {
-    std::cout << "Row: " << stream->row_key()
-              << " column_family: " << stream->column_family()
-              << " column_qualifier: " << stream->column_qualifier()
-              << " column_timestamp: " << stream->timestamp().count()
-              << " column_value: " << stream->value() << " label: "
-              << (stream->HasLabel() ? stream->label() : std::string("unset"))
-              << std::endl;
-
     if (request.rows_limit() > 0) {
       if (!current_row_key.has_value() ||
           stream->row_key() != current_row_key.value()) {
@@ -685,16 +775,13 @@ Status Table::ReadRows(google::bigtable::v2::ReadRowsRequest const& request,
     }
 
     if (!row_streamer.Stream(*stream)) {
-      std::cout << "HOW?" << std::endl;
       return AbortedError("Stream closed by the client.", GCP_ERROR_INFO());
     }
   }
 
   if (!row_streamer.Flush(true)) {
-    std::cout << "Flush failed?" << std::endl;
     return AbortedError("Stream closed by the client.", GCP_ERROR_INFO());
   }
-  std::cout << "Print stop" << std::endl;
   return Status();
 }
 
@@ -993,7 +1080,8 @@ Status RowTransaction::AddToCell(
   }
 
   if (!maybe_old_value.value()) {
-    DeleteValue delete_value{cf, std::move(column_qualifier), ts_ms};
+    DeleteValue delete_value{cf, add_to_cell.family_name(),
+                             std::move(column_qualifier), ts_ms};
     undo_.emplace(std::move(delete_value));
   } else {
     RestoreValue restore_value{cf, std::move(column_qualifier), ts_ms,
@@ -1050,6 +1138,13 @@ Status RowTransaction::DeleteFromColumn(
       row_key_, delete_from_column.column_qualifier(),
       delete_from_column.time_range());
 
+  std::string prefixed_cf_name = table_key_ + "/" + delete_from_column.family_name();
+  Storage* storage = GetGlobalStorage();
+  if (storage != nullptr) {
+    storage->DeleteColumn(table_key_, row_key_, prefixed_cf_name,
+                          delete_from_column.column_qualifier());
+  }
+
   for (auto& cell : deleted_cells) {
     RestoreValue restore_value{
         column_family, delete_from_column.column_qualifier(),
@@ -1061,66 +1156,65 @@ Status RowTransaction::DeleteFromColumn(
 }
 
 Status RowTransaction::DeleteFromRow() {
-  bool row_existed;
+  bool row_existed = false;
   for (auto& column_family : table_->column_families_) {
     auto deleted_columns = column_family.second->DeleteRow(row_key_);
 
     for (auto& column : deleted_columns) {
+      auto const& column_qualifier = column.first;
       for (auto& cell : column.second) {
-        RestoreValue restrore_value = {*column_family.second,
-                                       std::move(column.first), cell.timestamp,
-                                       std::move(cell.value)};
-        undo_.emplace(std::move(restrore_value));
+        RestoreValue restore_value = {*column_family.second, column_qualifier,
+                                      cell.timestamp, std::move(cell.value)};
+        undo_.emplace(std::move(restore_value));
         row_existed = true;
       }
     }
   }
 
-  if (row_existed) {
-    return Status();
+  if (!row_existed) {
+    return NotFoundError("row not found in table",
+                         GCP_ERROR_INFO().WithMetadata("row", row_key_));
   }
 
-  return NotFoundError("row not found in table",
-                       GCP_ERROR_INFO().WithMetadata("row", row_key_));
+  Storage* storage = GetGlobalStorage();
+  if (storage != nullptr) {
+    storage->DeleteRow(table_key_, row_key_);
+  }
+
+  return Status();
 }
 
 Status RowTransaction::DeleteFromFamily(
     ::google::bigtable::v2::Mutation_DeleteFromFamily const&
         delete_from_family) {
-  // If the request references an incorrect schema (non-existent
-  // column family) then return a failure status error immediately.
   auto maybe_column_family = table_->FindColumnFamily(delete_from_family);
   if (!maybe_column_family.ok()) {
     return maybe_column_family.status();
   }
 
-  auto column_family_it = table_->find(delete_from_family.family_name());
-  if (column_family_it == table_->end()) {
-    return NotFoundError(
-        "column family not found in table",
-        GCP_ERROR_INFO().WithMetadata("column family",
-                                      delete_from_family.family_name()));
-  }
-
-  std::map<std::string, ColumnFamilyRow>::iterator column_family_row_it;
-  if (column_family_it->second->find(row_key_) ==
-      column_family_it->second->end()) {
-    // The row does not exist
+  auto& column_family = maybe_column_family->get();
+  auto deleted_columns = column_family.DeleteRow(row_key_);
+  if (deleted_columns.empty()) {
     return NotFoundError(
         "row key is not found in column family",
         GCP_ERROR_INFO()
             .WithMetadata("row key", row_key_)
-            .WithMetadata("column family", column_family_it->first));
+            .WithMetadata("column family", delete_from_family.family_name()));
   }
 
-  auto deleted = column_family_it->second->DeleteRow(row_key_);
-  for (auto const& column : deleted) {
-    for (auto const& cell : column.second) {
-      RestoreValue restore_value{*column_family_it->second,
-                                 std::move(column.first), cell.timestamp,
+  for (auto& column : deleted_columns) {
+    auto const& column_qualifier = column.first;
+    for (auto& cell : column.second) {
+      RestoreValue restore_value{column_family, column_qualifier, cell.timestamp,
                                  std::move(cell.value)};
       undo_.emplace(std::move(restore_value));
     }
+  }
+
+  std::string prefixed_cf_name = table_key_ + "/" + delete_from_family.family_name();
+  Storage* storage = GetGlobalStorage();
+  if (storage != nullptr) {
+    storage->DeleteCFRow(table_key_, row_key_, prefixed_cf_name);
   }
 
   return Status();
@@ -1141,16 +1235,22 @@ Status RowTransaction::SetCell(
 
   auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::microseconds(set_cell.timestamp_micros()));
-
   if (timestamp_override.has_value()) {
     timestamp = timestamp_override.value();
+  }
+
+  std::string family_with_table_name = table_key_ + "/" + set_cell.family_name();
+  Storage* storage = GetGlobalStorage();
+  if (storage != nullptr) {
+    storage->PutCell(table_key_, row_key_, family_with_table_name,
+                     set_cell.column_qualifier(), timestamp, set_cell.value());
   }
 
   auto maybe_old_value = column_family.SetCell(
       row_key_, set_cell.column_qualifier(), timestamp, set_cell.value());
 
   if (!maybe_old_value) {
-    DeleteValue delete_value{column_family,
+    DeleteValue delete_value{column_family, set_cell.family_name(),
                              std::move(set_cell.column_qualifier()), timestamp};
     undo_.emplace(std::move(delete_value));
   } else {
@@ -1181,8 +1281,8 @@ void ProcessReadModifyWriteResult(
     undo.emplace(std::move(restore_value));
   } else {
     // We created a new cell -- we would need to delete it in any rollback
-    DeleteValue delete_value{column_family, rule.column_qualifier(),
-                             result.timestamp};
+    DeleteValue delete_value{column_family, rule.family_name(),
+                             rule.column_qualifier(), result.timestamp};
     undo.emplace(std::move(delete_value));
   }
 
@@ -1290,9 +1390,15 @@ void RowTransaction::Undo() {
 
     auto* delete_value = absl::get_if<DeleteValue>(&op);
     if (delete_value) {
+      auto* storage = GetGlobalStorage();
+      if (storage != nullptr && !table_key_.empty()) {
+        storage->DeleteCell(table_key_, row_key,
+                            table_key_ + "/" + delete_value->family_name,
+                            delete_value->column_qualifier,
+                            delete_value->timestamp);
+      }
       delete_value->column_family.DeleteTimeStamp(
-          row_key, std::move(delete_value->column_qualifier),
-          delete_value->timestamp);
+          row_key, delete_value->column_qualifier, delete_value->timestamp);
       continue;
     }
 

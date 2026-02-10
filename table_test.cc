@@ -1,3 +1,5 @@
+// TODO: uncommment this test
+
 // Copyright 2024 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -45,7 +47,9 @@ std::string DumpStream(AbstractCellStreamImpl& stream,
 }
 
 TEST(FilteredTableStream, Empty) {
-  FilteredTableStream stream({});
+  FilteredTableStream stream(
+    std::vector<std::unique_ptr<FilteredColumnFamilyStream>>{}
+  );
   EXPECT_EQ("", DumpStream(stream));
 }
 

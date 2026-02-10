@@ -23,6 +23,7 @@
 #include "filter.h"
 #include "filtered_map.h"
 #include "range_set.h"
+#include "storage.h"
 #include <google/bigtable/admin/v2/table.pb.h>
 #include <google/bigtable/admin/v2/types.pb.h>
 #include <google/bigtable/v2/data.pb.h>
@@ -37,6 +38,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <rocksdb/iterator.h>
 
 namespace google {
 namespace cloud {
@@ -635,6 +637,55 @@ class FilteredColumnFamilyStream : public AbstractCellStreamImpl {
       cell_it_;
   mutable absl::optional<CellView> cur_value_;
   mutable bool initialized_{false};
+};
+
+
+class PersistentFilteredColumnFamilyStream : public AbstractCellStreamImpl {
+  public:
+   PersistentFilteredColumnFamilyStream(const std::string& table_name, 
+                                        const std::string& family, 
+                                        const std::string& start_row_key = "");
+   
+   ~PersistentFilteredColumnFamilyStream() override;
+ 
+   bool ApplyFilter(InternalFilter const& internal_filter) override;
+   bool HasValue() const override;
+   CellView const& Value() const override;
+   bool Next(NextMode mode) override;
+   std::string const& column_family_name() const { return cur_family_; }
+
+ 
+  private:
+   // Helper to parse the current RocksDB key into member variables
+   bool ParseCurrentKey();
+   
+   // Ensures the iterator is initialized
+   void InitializeIfNeeded() const;
+ 
+   Storage* storage_;
+   mutable std::unique_ptr<rocksdb::Iterator> it_;
+   std::string table_prefix_;
+   std::string start_row_key_;
+   mutable bool initialized_ = false;
+   mutable bool has_value_ = false;
+ 
+   // Data buffers to back the references in CellView
+   // CellView holds std::reference_wrapper, so these strings must persist
+   mutable std::string cur_row_;
+   mutable std::string cur_family_;
+   mutable std::string cur_family_bare_;
+   mutable std::string cur_qualifier_;
+   mutable std::chrono::milliseconds cur_timestamp_;
+   mutable std::string cur_value_;
+ 
+   // Cache for the current view
+   mutable std::optional<CellView> current_view_;
+
+   std::shared_ptr<StringRangeSet const> row_ranges_;
+   std::vector<std::shared_ptr<re2::RE2 const>> row_regexes_;
+   mutable StringRangeSet column_ranges_;
+   std::vector<std::shared_ptr<re2::RE2 const>> column_regexes_;
+   mutable TimestampRangeSet timestamp_ranges_;
 };
 
 }  // namespace emulator

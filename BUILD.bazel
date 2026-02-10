@@ -24,6 +24,7 @@ cc_library(
     hdrs = bigtable_emulator_common_hdrs,
     deps = [
         "@google_cloud_cpp//google/cloud/bigtable:google_cloud_cpp_bigtable",
+        "@rocksdb//:rocksdb"
     ],
 )
 
@@ -39,6 +40,14 @@ cc_binary(
         "@com_google_protobuf//:protobuf",
         "@google_cloud_cpp//:grpc_utils",
         "@google_cloud_cpp//google/cloud/bigtable:google_cloud_cpp_bigtable",
+    ],
+)
+
+cc_binary(
+    name = "clear",
+    srcs = ["clear_db.cc"],
+    deps = [
+        ":bigtable_emulator_common", # This provides storage.h and storage.cc
     ],
 )
 

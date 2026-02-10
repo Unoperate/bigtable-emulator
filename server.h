@@ -24,7 +24,7 @@ namespace google {
 namespace cloud {
 namespace bigtable {
 namespace emulator {
-
+class Cluster;
 class EmulatorServer {
  public:
   virtual ~EmulatorServer() = default;
@@ -35,6 +35,8 @@ class EmulatorServer {
   virtual void Shutdown() = 0;
   /// Wait until the server shuts down.
   virtual void Wait() = 0;
+  // return owned cluster instance
+  virtual std::shared_ptr<Cluster> cluster() = 0;
 };
 
 StatusOr<std::unique_ptr<EmulatorServer>> CreateDefaultEmulatorServer(
