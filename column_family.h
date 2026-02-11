@@ -28,7 +28,6 @@
 #include <google/bigtable/v2/data.pb.h>
 #include <google/protobuf/duration.pb.h>
 #include <google/protobuf/repeated_field.h>
-#include <google/protobuf/stubs/mutex.h>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>

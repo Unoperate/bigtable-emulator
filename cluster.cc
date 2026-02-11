@@ -49,7 +49,7 @@ namespace btadmin = google::bigtable::admin::v2;
  * @return the trimmed schema or error
  */
 StatusOr<btadmin::Table> ApplyView(std::string const& table_name,
-                                   Table const& table, btadmin::Table_View view,
+                                   google::bigtable::admin::v2::Table const& table, btadmin::Table_View view,
                                    btadmin::Table_View default_view) {
   if (view == btadmin::Table::VIEW_UNSPECIFIED) {
     view = default_view;
@@ -66,7 +66,7 @@ StatusOr<btadmin::Table> ApplyView(std::string const& table_name,
     case btadmin::Table::SCHEMA_VIEW: {
       btadmin::Table res;
       res.set_name(table_name);
-      auto before_view = table.GetSchema();
+      auto before_view = table;
       *res.mutable_column_families() =
           std::move(*before_view.mutable_column_families());
       res.set_granularity(before_view.granularity());
@@ -76,13 +76,13 @@ StatusOr<btadmin::Table> ApplyView(std::string const& table_name,
     case btadmin::Table::ENCRYPTION_VIEW: {
       btadmin::Table res;
       res.set_name(table_name);
-      auto before_view = table.GetSchema();
+      auto before_view = table;
       *res.mutable_cluster_states() =
           std::move(*before_view.mutable_cluster_states());
       return res;
     }
     case btadmin::Table::FULL:
-      return table.GetSchema();
+      return table;
     default:
       return google::cloud::internal::UnimplementedError(
           "Unsupported view.",
@@ -95,39 +95,23 @@ StatusOr<btadmin::Table> ApplyView(std::string const& table_name,
 StatusOr<btadmin::Table> Cluster::CreateTable(std::string const& table_name,
                                               btadmin::Table schema) {
   schema.set_name(table_name);
-  std::cout << "Creating table " << table_name << std::endl;
-  auto maybe_table = Table::Create(std::move(schema));
-  if (!maybe_table) {
-    return maybe_table.status();
+  auto status = storage_->CreateTable(schema);
+  if (!status.ok()) {
+    return status;
+  } else {
+    return schema;
   }
-  {
-    std::lock_guard<std::mutex> lock(mu_);
-    if (!table_by_name_.emplace(table_name, *maybe_table).second) {
-      return google::cloud::internal::AlreadyExistsError(
-          "Table already exists.",
-          GCP_ERROR_INFO().WithMetadata("table_name", table_name));
-    }
-  }
-  return (*maybe_table)->GetSchema();
 }
 
 StatusOr<std::vector<btadmin::Table>> Cluster::ListTables(
     std::string const& instance_name, btadmin::Table_View view) const {
   std::map<std::string, std::shared_ptr<Table>> table_by_name_copy;
-  {
-    std::lock_guard<std::mutex> lock(mu_);
-    table_by_name_copy = table_by_name_;
-  }
   std::vector<btadmin::Table> res;
   std::string const prefix = instance_name + "/tables/";
-  std::cout << "Listing tables with prefix " << prefix << std::endl;
-  for (auto name_and_table_it = table_by_name_copy.upper_bound(prefix);
-       name_and_table_it != table_by_name_copy.end() &&
-       absl::StartsWith(name_and_table_it->first, prefix);
-       ++name_and_table_it) {
+
+  for(auto [name, meta] : storage_->Tables()) {
     auto maybe_view =
-        ApplyView(name_and_table_it->first, *name_and_table_it->second, view,
-                  btadmin::Table::NAME_ONLY);
+        ApplyView(name, meta.table(), view, btadmin::Table::NAME_ONLY);
     if (!maybe_view) {
       return maybe_view.status();
     }
@@ -138,43 +122,40 @@ StatusOr<std::vector<btadmin::Table>> Cluster::ListTables(
 
 StatusOr<btadmin::Table> Cluster::GetTable(std::string const& table_name,
                                            btadmin::Table_View view) const {
-  std::shared_ptr<Table> found_table;
-  {
-    std::lock_guard<std::mutex> lock(mu_);
-    auto it = table_by_name_.find(table_name);
-    if (it == table_by_name_.end()) {
-      return NotFoundError("No such table.", GCP_ERROR_INFO().WithMetadata(
-                                                 "table_name", table_name));
-    }
-    found_table = it->second;
+
+  const auto meta = storage_->GetTable(table_name);
+  if (!meta.ok()) {
+    return meta.status();
   }
-  return ApplyView(table_name, *found_table, view, btadmin::Table::SCHEMA_VIEW);
+  return meta.value().table();
 }
 
 Status Cluster::DeleteTable(std::string const& table_name) {
-  {
-    std::lock_guard<std::mutex> lock(mu_);
-    auto it = table_by_name_.find(table_name);
-    if (it == table_by_name_.end()) {
-      return NotFoundError("No such table.", GCP_ERROR_INFO().WithMetadata(
-                                                 "table_name", table_name));
-    }
-    if (it->second->IsDeleteProtected()) {
+  return storage_->DeleteTable(table_name, [](auto const& table_name, auto const& meta) -> Status {
+    if (meta.table().deletion_protection()) {
       return FailedPreconditionError(
           "The table has deletion protection.",
           GCP_ERROR_INFO().WithMetadata("table_name", table_name));
     }
-    table_by_name_.erase(it);
-  }
-  return Status();
+    return Status();
+  });
 }
 
 bool Cluster::HasTable(std::string const& table_name) const {
-  std::lock_guard<std::mutex> lock(mu_);
-  return table_by_name_.find(table_name) != table_by_name_.end();
+  return storage_->HasTable(table_name);
 }
 
-StatusOr<std::shared_ptr<Table>> Cluster::FindTable(
+StatusOr<std::shared_ptr<PersistedTable>> Cluster::FindTable(
+    std::string const& table_name) {
+  auto maybe_table = storage_->GetTable(table_name);
+  if (!maybe_table.ok()) {
+    return NotFoundError("No such table.", GCP_ERROR_INFO().WithMetadata(
+                                               "table_name", table_name));
+  }
+  return std::make_shared<PersistedTable>(table_name, storage_);
+}
+
+StatusOr<std::shared_ptr<Table>> Cluster::FindLegacyTable(
     std::string const& table_name) {
   {
     std::lock_guard<std::mutex> lock(mu_);

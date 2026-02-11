@@ -16,6 +16,8 @@
 #include "absl/flags/parse.h"
 #include "absl/flags/usage.h"
 #include "absl/strings/str_cat.h"
+#include "persist/rocksdb/storage.h"
+#include "persist/utils/logging.h"
 #include "server.h"
 #include <cstdint>
 #include <cstdlib>
@@ -26,15 +28,18 @@ ABSL_FLAG(std::string, host, "localhost",
           "the address to bind to on the local machine");
 ABSL_FLAG(std::uint16_t, port, 8888,
           "the port to bind to on the local machine");
+ABSL_FLAG(std::string, storage_path, "/tmp/bt-rocksdb-data",
+          "Persistent storage RocksDB path");
 
 int main(int argc, char* argv[]) {
+  ConfigureEmulatorLogging();
   absl::SetProgramUsageMessage(
       absl::StrCat("Usage: %s -h <host> -p <port>", argv[0]));
   absl::ParseCommandLine(argc, argv);
 
   auto maybe_server =
       google::cloud::bigtable::emulator::CreateDefaultEmulatorServer(
-          absl::GetFlag(FLAGS_host), absl::GetFlag(FLAGS_port));
+          absl::GetFlag(FLAGS_host), absl::GetFlag(FLAGS_port), std::make_shared<google::cloud::bigtable::emulator::RocksDBStorage>());
   if (!maybe_server) {
     std::cerr << "CreateDefaultEmulatorServer() failed. See logs for "
                  "possible reason"

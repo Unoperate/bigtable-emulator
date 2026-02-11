@@ -15,6 +15,9 @@
 #ifndef GOOGLE_CLOUD_CPP_GOOGLE_CLOUD_BIGTABLE_EMULATOR_CLUSTER_H
 #define GOOGLE_CLOUD_CPP_GOOGLE_CLOUD_BIGTABLE_EMULATOR_CLUSTER_H
 
+#include "persist/persisted_table.h"
+#include "persist/storage.h"
+#include "table.h"
 #include "google/cloud/status.h"
 #include "google/cloud/status_or.h"
 #include "table.h"
@@ -38,6 +41,9 @@ namespace emulator {
  */
 class Cluster {
  public:
+
+   explicit Cluster(std::shared_ptr<Storage> storage): storage_(storage) {}
+
   /**
    * Create a new table according to schema.
    *
@@ -102,9 +108,16 @@ class Cluster {
    *     `/projects/{}/instances/{}/tables/{}`.
    * @return a pointer to the table or error if it doesn't exist.
    */
-  StatusOr<std::shared_ptr<Table>> FindTable(std::string const& table_name);
+  StatusOr<std::shared_ptr<Table>> FindLegacyTable(std::string const& table_name);
+
+  
+  StatusOr<std::shared_ptr<PersistedTable>> FindTable(
+      std::string const& table_name);
+  
 
  private:
+  std::shared_ptr<Storage> storage_;
+
   mutable std::mutex mu_;
 
   /**
@@ -115,7 +128,7 @@ class Cluster {
    * concurrency - every access to a table should start with creating a copy of
    * the shared pointer.
    */
-  std::map<std::string, std::shared_ptr<Table>> table_by_name_;
+   std::map<std::string, std::shared_ptr<Table>> table_by_name_;
 };
 
 }  // namespace emulator

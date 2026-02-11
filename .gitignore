@@ -42,3 +42,9 @@ CMakeUserPresets.json
 
 # Lock files created by bzlmod. We do not want to accidentally commit these.
 MODULE.bazel.lock
+
+# Custom testing scripts (useful for local development)
+testing.sh
+
+# MacOS finder hidden files
+.DS_Store

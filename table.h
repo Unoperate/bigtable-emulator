@@ -15,6 +15,12 @@
 #ifndef GOOGLE_CLOUD_CPP_GOOGLE_CLOUD_BIGTABLE_EMULATOR_TABLE_H
 #define GOOGLE_CLOUD_CPP_GOOGLE_CLOUD_BIGTABLE_EMULATOR_TABLE_H
 
+#include "persist/storage.h"
+#include "column_family.h"
+#include "limits.h"
+#include "filter.h"
+#include "range_set.h"
+#include "row_streamer.h"
 #include "google/cloud/status.h"
 #include "google/cloud/status_or.h"
 #include "absl/types/optional.h"
@@ -46,6 +52,8 @@ namespace google {
 namespace cloud {
 namespace bigtable {
 namespace emulator {
+
+class MemoryStorageRowTX;
 
 /// Objects of this class represent Bigtable tables.
 class Table : public std::enable_shared_from_this<Table> {
@@ -138,10 +146,13 @@ class Table : public std::enable_shared_from_this<Table> {
   Table() = default;
   friend class RowSetIterator;
   friend class RowTransaction;
+  friend class MemoryStorageRowTX;
 
   template <typename MESSAGE>
   StatusOr<std::reference_wrapper<ColumnFamily>> FindColumnFamily(
       MESSAGE const& message) const;
+  StatusOr<std::reference_wrapper<ColumnFamily>> FindColumnFamily(
+      std::string const& message) const;
   bool IsDeleteProtectedNoLock() const;
   Status Construct(google::bigtable::admin::v2::Table schema);
   Status DoMutationsWithPossibleRollback(

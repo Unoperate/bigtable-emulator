@@ -15,6 +15,7 @@
 #ifndef GOOGLE_CLOUD_CPP_GOOGLE_CLOUD_BIGTABLE_EMULATOR_SERVER_H
 #define GOOGLE_CLOUD_CPP_GOOGLE_CLOUD_BIGTABLE_EMULATOR_SERVER_H
 
+#include "persist/storage.h"
 #include "google/cloud/status_or.h"
 #include <cstdint>
 #include <memory>
@@ -38,7 +39,7 @@ class EmulatorServer {
 };
 
 StatusOr<std::unique_ptr<EmulatorServer>> CreateDefaultEmulatorServer(
-    std::string const& host, std::uint16_t port);
+  std::string const& host, std::uint16_t port, const std::shared_ptr<Storage>& storage);
 
 }  // namespace emulator
 }  // namespace bigtable

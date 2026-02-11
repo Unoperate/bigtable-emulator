@@ -166,6 +166,12 @@ class AbstractCellStreamImpl {
   virtual bool Next(NextMode mode) = 0;
 };
 
+class AbstractFamilyColumnStreamImpl : public AbstractCellStreamImpl {
+  public:
+    virtual std::string const& column_family_name() const = 0;
+    virtual ~AbstractFamilyColumnStreamImpl() = default;
+};
+
 /**
  * A convenience wrapper around `AbstractCellStreamImpl`.
  *
