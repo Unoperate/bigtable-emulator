@@ -15,18 +15,18 @@
 #ifndef GOOGLE_CLOUD_CPP_GOOGLE_CLOUD_BIGTABLE_EMULATOR_COLUMN_FAMILY_H
 #define GOOGLE_CLOUD_CPP_GOOGLE_CLOUD_BIGTABLE_EMULATOR_COLUMN_FAMILY_H
 
+#include "google/cloud/internal/big_endian.h"
+#include "google/cloud/status.h"
+#include "google/cloud/status_or.h"
 #include "cell_view.h"
 #include "filter.h"
 #include "filtered_map.h"
+#include "key_coder.h"
 #include "range_set.h"
-#include "google/cloud/internal/big_endian.h"
-#include "google/cloud/status_or.h"
-#include "absl/types/optional.h"
+#include "rocksdb/utilities/transaction_db.h"
 #include <google/bigtable/admin/v2/types.pb.h>
-#include <google/bigtable/v2/data.pb.h>
 #include <chrono>
 #include <cstddef>
-#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
@@ -229,7 +229,7 @@ class ColumnFamilyRow {
   }
 
  private:
-  friend class ColumnFamily;
+  friend class InMemoryColumnFamily;
 
   std::map<std::string, ColumnRow> columns_;
 };
@@ -246,16 +246,113 @@ class ColumnFamilyRow {
 class ColumnFamily {
  public:
   ColumnFamily() = default;
+  virtual ~ColumnFamily() = default;
   // ConstructAggregateColumnFamily can be used to return an aggregate
   // ColumnFamily that can support AddToCell or MergeToCell and
   // similar aggregate complex types. To construct an ordinary
   // ColumnFamily, use the default constructor ColumnFamily().
-  static StatusOr<std::shared_ptr<ColumnFamily>> ConstructAggregateColumnFamily(
-      google::bigtable::admin::v2::Type value_type);
+  // static StatusOr<std::shared_ptr<ColumnFamily>>
+  // ConstructAggregateColumnFamily( google::bigtable::admin::v2::Type
+  // value_type);
+
+  virtual std::unique_ptr<AbstractCellStreamImpl> GetFilteredColumnFamilyStream(
+      std::shared_ptr<StringRangeSet const> row_set,
+      std::string column_family_name) = 0;
+
+  virtual bool RowKeyExists(std::string const& row_key) = 0;
+
+  absl::optional<google::bigtable::admin::v2::Type> GetValueType() {
+    return value_type_;
+  };
+
+  std::function<StatusOr<std::string>(std::string const&, std::string&&)>
+      update_cell_ = DefaultUpdateCell;
+
+ protected:
+  // Support for aggregate and other complex types.
+  absl::optional<google::bigtable::admin::v2::Type> value_type_ = absl::nullopt;
+
+  static Status ChooseCellUpdateFunction(
+      google::bigtable::admin::v2::Type value_type,
+      std::shared_ptr<ColumnFamily> const& cf);
+
+  static StatusOr<std::string> DefaultUpdateCell(
+      std::string const& /*existing_value*/, std::string&& new_value) {
+    return new_value;
+  };
+
+  static StatusOr<std::string> SumUpdateCellBEInt64(
+      std::string const& existing_value, std::string&& new_value) {
+    auto existing_value_int =
+        google::cloud::internal::DecodeBigEndian<std::int64_t>(existing_value);
+    if (!existing_value_int) {
+      return existing_value_int.status();
+    }
+
+    auto new_value_int =
+        google::cloud::internal::DecodeBigEndian<std::int64_t>(new_value);
+    if (!new_value_int) {
+      return new_value_int.status();
+    }
+
+    return google::cloud::internal::EncodeBigEndian(existing_value_int.value() +
+                                                    new_value_int.value());
+  };
+
+  static StatusOr<std::string> MaxUpdateCellBEInt64(
+      std::string const& existing_value, std::string&& new_value) {
+    auto existing_int =
+        google::cloud::internal::DecodeBigEndian<std::int64_t>(existing_value);
+    if (!existing_int) {
+      return existing_int.status();
+    }
+    auto new_int =
+        google::cloud::internal::DecodeBigEndian<std::int64_t>(new_value);
+    if (!new_int) {
+      return new_int.status();
+    }
+
+    if (existing_int.value() > new_int.value()) {
+      return existing_value;
+    }
+
+    return new_value;
+  };
+
+  static StatusOr<std::string> MinUpdateCellBEInt64(
+      std::string const& existing_value, std::string&& new_value) {
+    auto existing_int =
+        google::cloud::internal::DecodeBigEndian<std::int64_t>(existing_value);
+    if (!existing_int) {
+      return existing_int.status();
+    }
+    auto new_int =
+        google::cloud::internal::DecodeBigEndian<std::int64_t>(new_value);
+    if (!new_int) {
+      return new_int.status();
+    }
+
+    if (existing_int.value() < new_int.value()) {
+      return existing_value;
+    }
+
+    return new_value;
+  };
+};
+
+class InMemoryColumnFamily : public ColumnFamily {
+ public:
+  InMemoryColumnFamily() = default;
+  // ConstructAggregateColumnFamily can be used to return an aggregate
+  // ColumnFamily that can support AddToCell or MergeToCell and
+  // similar aggregate complex types. To construct an ordinary
+  // ColumnFamily, use the default constructor ColumnFamily().
+  static StatusOr<std::shared_ptr<InMemoryColumnFamily>>
+  ConstructAggregateColumnFamily(google::bigtable::admin::v2::Type value_type);
 
   // Disable copying.
-  ColumnFamily(ColumnFamily const&) = delete;
-  ColumnFamily& operator=(ColumnFamily const&) = delete;
+  InMemoryColumnFamily(InMemoryColumnFamily const&) = delete;
+  InMemoryColumnFamily& operator=(InMemoryColumnFamily const&) = delete;
 
   using const_iterator = std::map<std::string, ColumnFamilyRow>::const_iterator;
   using iterator = std::map<std::string, ColumnFamilyRow>::iterator;
@@ -382,82 +479,66 @@ class ColumnFamily {
     return rows_.erase(row_it);
   }
 
-  void clear() { rows_.clear(); }
-  absl::optional<google::bigtable::admin::v2::Type> GetValueType() {
-    return value_type_;
-  };
+  void RemoveAllDataFromColumnFamily() { rows_.clear(); };
+
+  std::unique_ptr<AbstractCellStreamImpl> GetFilteredColumnFamilyStream(
+      std::shared_ptr<StringRangeSet const> row_set,
+      std::string column_family_name) override;
+
+  bool RowKeyExists(std::string const& row_key) override {
+    return this->find(row_key) != this->end();
+  }
 
  private:
   std::map<std::string, ColumnFamilyRow> rows_;
+};
 
-  // Support for aggregate and other complex types.
-  absl::optional<google::bigtable::admin::v2::Type> value_type_ = absl::nullopt;
+/**
+ * Convenience wrapper around ColumnFamilyHandle
+ */
+class PersistentColumnFamily : public ColumnFamily {
+ public:
+  PersistentColumnFamily() = default;
+  static StatusOr<std::shared_ptr<PersistentColumnFamily>> Create(
+      std::shared_ptr<rocksdb::TransactionDB> db,
+      rocksdb::ColumnFamilyOptions const& opts, std::string const& name);
 
-  static StatusOr<std::string> DefaultUpdateCell(
-      std::string const& /*existing_value*/, std::string&& new_value) {
-    return new_value;
-  };
+  static StatusOr<std::shared_ptr<PersistentColumnFamily>> OpenExisting(
+      std::shared_ptr<rocksdb::TransactionDB> db,
+      std::shared_ptr<rocksdb::ColumnFamilyHandle> handle,
+      absl::optional<google::bigtable::admin::v2::Type> const& value_type);
 
-  static StatusOr<std::string> SumUpdateCellBEInt64(
-      std::string const& existing_value, std::string&& new_value) {
-    auto existing_value_int =
-        google::cloud::internal::DecodeBigEndian<std::int64_t>(existing_value);
-    if (!existing_value_int) {
-      return existing_value_int.status();
-    }
+  PersistentColumnFamily(PersistentColumnFamily&& other) noexcept {
+    db_ = std::move(other.db_);
+    handle_ = std::move(other.handle_);
+    value_type_ = std::move(other.value_type_);
+  }
 
-    auto new_value_int =
-        google::cloud::internal::DecodeBigEndian<std::int64_t>(new_value);
-    if (!new_value_int) {
-      return new_value_int.status();
-    }
+  bool RowKeyExists(std::string const& row_key) override;
 
-    return google::cloud::internal::EncodeBigEndian(existing_value_int.value() +
-                                                    new_value_int.value());
-  };
+  rocksdb::ColumnFamilyHandle* GetRaw() const { return handle_.get(); }
 
-  static StatusOr<std::string> MaxUpdateCellBEInt64(
-      std::string const& existing_value, std::string&& new_value) {
-    auto existing_int =
-        google::cloud::internal::DecodeBigEndian<std::int64_t>(existing_value);
-    if (!existing_int) {
-      return existing_int.status();
-    }
-    auto new_int =
-        google::cloud::internal::DecodeBigEndian<std::int64_t>(new_value);
-    if (!new_int) {
-      return new_int.status();
-    }
+  std::unique_ptr<AbstractCellStreamImpl> GetFilteredColumnFamilyStream(
+      std::shared_ptr<StringRangeSet const> row_set,
+      std::string column_family_name) override;
 
-    if (existing_int.value() > new_int.value()) {
-      return existing_value;
-    }
+  void ResetHandle(std::shared_ptr<rocksdb::ColumnFamilyHandle> h) {
+    handle_ = std::move(h);
+  }
 
-    return new_value;
-  };
+  rocksdb::ColumnFamilyHandle* ToRawPtr() const { return handle_.get(); }
+  std::shared_ptr<rocksdb::ColumnFamilyHandle> GetHandle() { return handle_; };
+  static StatusOr<std::shared_ptr<PersistentColumnFamily>>
+  ConstructAggregateColumnFamily(
+      google::bigtable::admin::v2::Type const& value_type,
+      std::shared_ptr<rocksdb::TransactionDB> db_, std::string const& name);
 
-  static StatusOr<std::string> MinUpdateCellBEInt64(
-      std::string const& existing_value, std::string&& new_value) {
-    auto existing_int =
-        google::cloud::internal::DecodeBigEndian<std::int64_t>(existing_value);
-    if (!existing_int) {
-      return existing_int.status();
-    }
-    auto new_int =
-        google::cloud::internal::DecodeBigEndian<std::int64_t>(new_value);
-    if (!new_int) {
-      return new_int.status();
-    }
-
-    if (existing_int.value() < new_int.value()) {
-      return existing_value;
-    }
-
-    return new_value;
-  };
-
-  std::function<StatusOr<std::string>(std::string const&, std::string&&)>
-      update_cell_ = DefaultUpdateCell;
+ private:
+  // Owning  table
+  std::shared_ptr<rocksdb::TransactionDB> db_;
+  std::shared_ptr<rocksdb::ColumnFamilyHandle> handle_;
+  google::cloud::Status ConfigureFromValueType(
+      absl::optional<google::bigtable::admin::v2::Type> const& value_type);
 };
 
 /**
@@ -476,7 +557,7 @@ class ColumnFamily {
  * Objects of this class are not thread safe. Their users need to ensure that
  * underlying `ColumnFamily` object tree doesn't change.
  */
-class FilteredColumnFamilyStream : public AbstractCellStreamImpl {
+class FilteredInMemoryColumnFamilyStream : public AbstractCellStreamImpl {
  public:
   /**
    * Construct a new object.
@@ -488,9 +569,9 @@ class FilteredColumnFamilyStream : public AbstractCellStreamImpl {
    * @row_set the row set indicating which row keys include in the returned
    *     values.
    */
-  FilteredColumnFamilyStream(ColumnFamily const& column_family,
-                             std::string column_family_name,
-                             std::shared_ptr<StringRangeSet const> row_set);
+  FilteredInMemoryColumnFamilyStream(
+      InMemoryColumnFamily const& column_family, std::string column_family_name,
+      std::shared_ptr<StringRangeSet const> row_set);
   bool ApplyFilter(InternalFilter const& internal_filter) override;
   bool HasValue() const override;
   CellView const& Value() const override;
@@ -531,7 +612,7 @@ class FilteredColumnFamilyStream : public AbstractCellStreamImpl {
   std::vector<std::shared_ptr<re2::RE2 const>> column_regexes_;
   mutable TimestampRangeSet timestamp_ranges_;
 
-  RegexFiteredMapView<StringRangeFilteredMapView<ColumnFamily>> rows_;
+  RegexFiteredMapView<StringRangeFilteredMapView<InMemoryColumnFamily>> rows_;
   mutable absl::optional<
       RegexFiteredMapView<StringRangeFilteredMapView<ColumnFamilyRow>>>
       columns_;
@@ -542,7 +623,7 @@ class FilteredColumnFamilyStream : public AbstractCellStreamImpl {
   //   if (row_it_ != rows_.end()) then
   //   cell_it_ != cells.end() && column_it_ != columns_.end().
   mutable absl::optional<RegexFiteredMapView<
-      StringRangeFilteredMapView<ColumnFamily>>::const_iterator>
+      StringRangeFilteredMapView<InMemoryColumnFamily>>::const_iterator>
       row_it_;
   mutable absl::optional<RegexFiteredMapView<
       StringRangeFilteredMapView<ColumnFamilyRow>>::const_iterator>
@@ -552,6 +633,56 @@ class FilteredColumnFamilyStream : public AbstractCellStreamImpl {
       cell_it_;
   mutable absl::optional<CellView> cur_value_;
   mutable bool initialized_{false};
+};
+
+class FilteredPersistentColumnFamilyStream : public AbstractCellStreamImpl {
+ public:
+  FilteredPersistentColumnFamilyStream(
+      std::shared_ptr<rocksdb::ColumnFamilyHandle> handle,
+      std::string column_family_name,
+      std::shared_ptr<rocksdb::TransactionDB> db,
+      std::shared_ptr<StringRangeSet const> row_set);
+  bool ApplyFilter(InternalFilter const& internal_filter) override;
+  bool HasValue() const override;
+  CellView const& Value() const override;
+  bool Next(NextMode mode) override;
+  std::string const& column_family_name() const { return column_family_name_; }
+
+ private:
+  class FilterApply;
+  void InitializeIfNeeded() const;
+
+  bool MatchesAll(absl::string_view value,
+                  std::vector<std::shared_ptr<RE2 const>> const& regexes) const;
+
+  bool JumpToNextValid();
+
+  std::string column_family_name_;
+  std::shared_ptr<rocksdb::ColumnFamilyHandle> handle_;
+  std::shared_ptr<rocksdb::TransactionDB> db_;
+
+  std::shared_ptr<StringRangeSet const> row_ranges_;
+  std::vector<std::shared_ptr<RE2 const>> row_regexes_;
+  std::set<StringRangeSet::Range,
+           StringRangeSet::Range::StartLess>::const_iterator col_filter_pos_;
+  std::vector<std::shared_ptr<RE2 const>> column_regexes_;
+  std::set<TimestampRangeSet::Range,
+           TimestampRangeSet::Range::StartLess>::reverse_iterator
+      ts_filter_pos_;
+  std::string current_row_key_tracker_;
+  std::string current_col_key_tracker_;
+
+  std::shared_ptr<StringRangeSet const> row_set_;
+  mutable bool initialized_{false};
+  mutable std::unique_ptr<rocksdb::Iterator> it_;
+  mutable std::string curr_value_string_;
+  mutable absl::optional<CellView> cur_value_;
+  mutable TimestampRangeSet timestamp_ranges_;
+  mutable StringRangeSet column_ranges_;
+  mutable std::set<StringRangeSet::Range,
+                   StringRangeSet::Range::StartLess>::const_iterator
+      row_filter_pos_;
+  mutable DecodeResult curr_decoded_key_;
 };
 
 }  // namespace emulator

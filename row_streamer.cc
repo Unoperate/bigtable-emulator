@@ -13,9 +13,9 @@
 // limitations under the License.
 
 #include "row_streamer.h"
+#include "absl/types/optional.h"
 #include "cell_view.h"
 #include <google/bigtable/v2/bigtable.pb.h>
-#include "absl/types/optional.h"
 #include <chrono>
 #include <utility>
 
@@ -31,6 +31,8 @@ RowStreamer::RowStreamer(grpc::ServerWriter<btproto::ReadRowsResponse>& writer)
 
 bool RowStreamer::Stream(CellView const& cell) {
   btproto::ReadRowsResponse::CellChunk chunk;
+  std::cout << cell.row_key() << ' ' << cell.column_family() << ' '
+            << cell.timestamp().count() << '\n';
   if (!current_row_key_ || current_row_key_ != cell.row_key()) {
     if (!pending_chunks_.empty()) {
       pending_chunks_.back().set_commit_row(true);

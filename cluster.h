@@ -15,9 +15,10 @@
 #ifndef GOOGLE_CLOUD_CPP_GOOGLE_CLOUD_BIGTABLE_EMULATOR_CLUSTER_H
 #define GOOGLE_CLOUD_CPP_GOOGLE_CLOUD_BIGTABLE_EMULATOR_CLUSTER_H
 
-#include "table.h"
 #include "google/cloud/status.h"
 #include "google/cloud/status_or.h"
+#include "rocksdb/db.h"
+#include "table.h"
 #include <google/bigtable/admin/v2/table.pb.h>
 #include <map>
 #include <memory>
@@ -38,6 +39,8 @@ namespace emulator {
  */
 class Cluster {
  public:
+  Cluster() = delete;
+  explicit Cluster(bool should_persist);
   /**
    * Create a new table according to schema.
    *
@@ -61,7 +64,7 @@ class Cluster {
    */
   StatusOr<std::vector<google::bigtable::admin::v2::Table>> ListTables(
       std::string const& instance_name,
-      google::bigtable::admin::v2::Table_View view) const;
+      google::bigtable::admin::v2::Table_View view);
 
   /**
    * Get details about a given table.
@@ -74,7 +77,7 @@ class Cluster {
    */
   StatusOr<google::bigtable::admin::v2::Table> GetTable(
       std::string const& table_name,
-      google::bigtable::admin::v2::Table_View view) const;
+      google::bigtable::admin::v2::Table_View view);
 
   /**
    * Delete a table by its name.
@@ -93,7 +96,7 @@ class Cluster {
    *     `/projects/{}/instances/{}/tables/{}`.
    * @return true if table exists.
    */
-  bool HasTable(std::string const& table_name) const;
+  bool HasTable(std::string const& table_name);
 
   /**
    * Find a table by name.
@@ -105,6 +108,8 @@ class Cluster {
   StatusOr<std::shared_ptr<Table>> FindTable(std::string const& table_name);
 
  private:
+  void BootstrapTablesFromDisk(std::string const& table_path);
+
   mutable std::mutex mu_;
 
   /**
@@ -116,6 +121,10 @@ class Cluster {
    * the shared pointer.
    */
   std::map<std::string, std::shared_ptr<Table>> table_by_name_;
+
+  bool should_persist_;
+  std::string data_root_ = "/tmp/";
+  std::set<std::string> loaded_tables_paths_;
 };
 
 }  // namespace emulator

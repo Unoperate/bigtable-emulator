@@ -38,7 +38,7 @@ class EmulatorServer {
 };
 
 StatusOr<std::unique_ptr<EmulatorServer>> CreateDefaultEmulatorServer(
-    std::string const& host, std::uint16_t port);
+    std::string const& host, std::uint16_t port, bool persist);
 
 }  // namespace emulator
 }  // namespace bigtable

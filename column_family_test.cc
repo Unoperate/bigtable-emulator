@@ -13,12 +13,12 @@
 // limitations under the License.
 
 #include "column_family.h"
+#include "google/cloud/testing_util/chrono_literals.h"
 #include "filter.h"
 #include "range_set.h"
-#include "google/cloud/testing_util/chrono_literals.h"
+#include "re2/re2.h"
 #include <google/bigtable/v2/data.pb.h>
 #include <gtest/gtest.h>
-#include "re2/re2.h"
 #include <iterator>
 #include <memory>
 #include <ostream>
@@ -50,7 +50,7 @@ std::string DumpColumnFamilyRow(ColumnFamilyRow const& fam_row,
   return ss.str();
 }
 
-std::string DumpColumnFamily(ColumnFamily const& fam,
+std::string DumpColumnFamily(InMemoryColumnFamily const& fam,
                              std::string const& cf_name = "") {
   std::stringstream ss;
   for (auto const& fam_row : fam) {
@@ -160,7 +160,7 @@ col2 @10ms: qux
 TEST(ColumnFamily, Trivial) {
   using testing_util::chrono_literals::operator""_ms;
 
-  ColumnFamily fam;
+  InMemoryColumnFamily fam;
   fam.SetCell("row1", "col0", 10_ms, "foo");
   fam.SetCell("row1", "col0", 10_ms, "bar");
   EXPECT_EQ("row1 :col0 @10ms: bar\n", DumpColumnFamily(fam));
@@ -212,16 +212,16 @@ std::string DumpFilteredColumnFamilyStream(
 }
 
 TEST(FilteredColumnFamilyStream, Empty) {
-  ColumnFamily fam;
+  InMemoryColumnFamily fam;
   auto included_rows = std::make_shared<StringRangeSet>(StringRangeSet::All());
-  FilteredColumnFamilyStream filtered_stream(fam, "cf1", included_rows);
+  FilteredInMemoryColumnFamilyStream filtered_stream(fam, "cf1", included_rows);
   EXPECT_EQ("", DumpFilteredColumnFamilyStream(filtered_stream));
 }
 
 TEST(FilteredColumnFamilyStream, Unfiltered) {
   using testing_util::chrono_literals::operator""_ms;
 
-  ColumnFamily fam;
+  InMemoryColumnFamily fam;
   fam.SetCell("row0", "col0", 10_ms, "foo");
   fam.SetCell("row0", "col1", 20_ms, "bar");
   fam.SetCell("row0", "col1", 30_ms, "baz");
@@ -232,7 +232,7 @@ TEST(FilteredColumnFamilyStream, Unfiltered) {
   fam.SetCell("row2", "col2", 40_ms, "qux");
   fam.SetCell("row2", "col2", 50_ms, "qux");
   auto included_rows = std::make_shared<StringRangeSet>(StringRangeSet::All());
-  FilteredColumnFamilyStream filtered_stream(fam, "cf1", included_rows);
+  FilteredInMemoryColumnFamilyStream filtered_stream(fam, "cf1", included_rows);
   EXPECT_EQ(R"""(
 row0 cf1:col0 @10ms: foo
 row0 cf1:col1 @30ms: baz
@@ -250,7 +250,7 @@ row2 cf1:col2 @40ms: qux
 TEST(FilteredColumnFamilyStream, FilterByTimestampRange) {
   using testing_util::chrono_literals::operator""_ms;
 
-  ColumnFamily fam;
+  InMemoryColumnFamily fam;
   fam.SetCell("row0", "col0", 100_ms, "foo");
   fam.SetCell("row0", "col0", 300_ms, "bar");  // Filter out
 
@@ -275,7 +275,7 @@ TEST(FilteredColumnFamilyStream, FilterByTimestampRange) {
   fam.SetCell("row1", "col3", 300_ms, "foo");  // Filter out
   fam.SetCell("row1", "col3", 300_ms, "foo");  // Filter out
   auto included_rows = std::make_shared<StringRangeSet>(StringRangeSet::All());
-  FilteredColumnFamilyStream filtered_stream(fam, "cf1", included_rows);
+  FilteredInMemoryColumnFamilyStream filtered_stream(fam, "cf1", included_rows);
   filtered_stream.ApplyFilter(
       TimestampRange{TimestampRangeSet::Range(0_ms, 300_ms)});
   filtered_stream.ApplyFilter(
@@ -295,7 +295,7 @@ row1 cf1:col2 @100ms: foo
 TEST(FilteredColumnFamilyStream, FilterByColumnRange) {
   using testing_util::chrono_literals::operator""_ms;
 
-  ColumnFamily fam;
+  InMemoryColumnFamily fam;
   fam.SetCell("row0", "col0", 10_ms, "foo");  // Filter out
   fam.SetCell("row0", "col1", 100_ms, "foo");
   fam.SetCell("row0", "col2", 200_ms, "foo");
@@ -303,7 +303,7 @@ TEST(FilteredColumnFamilyStream, FilterByColumnRange) {
   fam.SetCell("row0", "col3", 300_ms, "foo");  // Filter out
   fam.SetCell("row2", "col1", 300_ms, "foo");
   auto included_rows = std::make_shared<StringRangeSet>(StringRangeSet::All());
-  FilteredColumnFamilyStream filtered_stream(fam, "cf1", included_rows);
+  FilteredInMemoryColumnFamilyStream filtered_stream(fam, "cf1", included_rows);
   filtered_stream.ApplyFilter(ColumnRange{
       "dummy", StringRangeSet::Range("col1", false, "col4", false)});
   filtered_stream.ApplyFilter(
@@ -323,7 +323,7 @@ TEST(FilteredColumnFamilyStream, FilterByColumnRegex) {
   auto pattern2 = std::make_shared<re2::RE2>("[02]");
   ASSERT_TRUE(pattern2->ok());
 
-  ColumnFamily fam;
+  InMemoryColumnFamily fam;
   fam.SetCell("row0", "col0", 10_ms, "foo");
   fam.SetCell("row0", "col1", 100_ms, "foo");  // Filter out
   fam.SetCell("row0", "col2", 200_ms, "foo");
@@ -332,7 +332,7 @@ TEST(FilteredColumnFamilyStream, FilterByColumnRegex) {
   fam.SetCell("row1", "col2", 300_ms, "foo");
   fam.SetCell("row2", "col0", 300_ms, "foo");
   auto included_rows = std::make_shared<StringRangeSet>(StringRangeSet::All());
-  FilteredColumnFamilyStream filtered_stream(fam, "cf1", included_rows);
+  FilteredInMemoryColumnFamilyStream filtered_stream(fam, "cf1", included_rows);
   filtered_stream.ApplyFilter(ColumnRegex{pattern1});
   filtered_stream.ApplyFilter(ColumnRegex{pattern2});
   EXPECT_EQ(R"""(
@@ -351,13 +351,13 @@ TEST(FilteredColumnFamilyStream, FilterRowKeyRegex) {
   auto pattern2 = std::make_shared<re2::RE2>("[02]");
   ASSERT_TRUE(pattern2->ok());
 
-  ColumnFamily fam;
+  InMemoryColumnFamily fam;
   fam.SetCell("row0", "col0", 10_ms, "foo");
   fam.SetCell("row1", "col1", 100_ms, "foo");  // Filter out
   fam.SetCell("row2", "col2", 200_ms, "foo");
   fam.SetCell("row3", "col3", 300_ms, "foo");  // Filter out
   auto included_rows = std::make_shared<StringRangeSet>(StringRangeSet::All());
-  FilteredColumnFamilyStream filtered_stream(fam, "cf1", included_rows);
+  FilteredInMemoryColumnFamilyStream filtered_stream(fam, "cf1", included_rows);
   filtered_stream.ApplyFilter(RowKeyRegex{pattern1});
   filtered_stream.ApplyFilter(RowKeyRegex{pattern2});
   EXPECT_EQ(R"""(
@@ -370,7 +370,7 @@ row2 cf1:col2 @200ms: foo
 TEST(FilteredColumnFamilyStream, FilterRowSet) {
   using testing_util::chrono_literals::operator""_ms;
 
-  ColumnFamily fam;
+  InMemoryColumnFamily fam;
   fam.SetCell("row0", "col0", 10_ms, "foo");
   fam.SetCell("row1", "col1", 100_ms, "foo");  // Filter out
   fam.SetCell("row2", "col2", 200_ms, "foo");
@@ -380,7 +380,7 @@ TEST(FilteredColumnFamilyStream, FilterRowSet) {
   included_rows->Sum(StringRangeSet::Range("row0", false, "row2", true));
   included_rows->Sum(StringRangeSet::Range(
       "row3", false, StringRangeSet::Range::Infinity{}, false));
-  FilteredColumnFamilyStream filtered_stream(fam, "cf1", included_rows);
+  FilteredInMemoryColumnFamilyStream filtered_stream(fam, "cf1", included_rows);
   EXPECT_EQ(R"""(
 row0 cf1:col0 @10ms: foo
 row1 cf1:col1 @100ms: foo

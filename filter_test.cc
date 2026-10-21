@@ -13,19 +13,18 @@
 // limitations under the License.
 
 #include "filter.h"
-#include "cell_view.h"
-#include "range_set.h"
-#include "test_util.h"
 #include "google/cloud/status.h"
 #include "google/cloud/status_or.h"
 #include "google/cloud/testing_util/chrono_literals.h"
 #include "google/cloud/testing_util/status_matchers.h"
-#include "gmock/gmock.h"
-#include <google/bigtable/v2/data.pb.h>
-#include "absl/types/optional.h"
 #include "absl/types/variant.h"
-#include <gtest/gtest.h>
+#include "cell_view.h"
+#include "gmock/gmock.h"
+#include "range_set.h"
 #include "re2/re2.h"
+#include "test_util.h"
+#include <google/bigtable/v2/data.pb.h>
+#include <gtest/gtest.h>
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
@@ -1908,7 +1907,7 @@ TEST_F(FilterWorkTest, ConditionBranchFilterNextDifferentThanCell) {
 // streaming cells from actual table data (hence end to end).
 TEST(FiltersEndToEnd, ColumnRange) {
   std::vector<std::string> column_families = {"family1", "family2", "family3"};
-  auto maybe_table = CreateTable("table", column_families);
+  auto maybe_table = CreateTable("table", column_families, false);
   ASSERT_STATUS_OK(maybe_table);
   auto& table = maybe_table.value();
 
@@ -1931,7 +1930,8 @@ TEST(FiltersEndToEnd, ColumnRange) {
   filter.mutable_column_range_filter()->set_start_qualifier_closed("b00");
   filter.mutable_column_range_filter()->set_end_qualifier_open("b02");
 
-  auto maybe_stream = table->CreateCellStream(all_rows_set, filter);
+  auto utilities = table->GetUtilities();
+  auto maybe_stream = utilities->CreateCellStream(all_rows_set, filter);
   ASSERT_STATUS_OK(maybe_stream);
 
   std::vector<TestCell> expected = {
@@ -1948,6 +1948,50 @@ TEST(FiltersEndToEnd, ColumnRange) {
   }
 
   ASSERT_EQ(expected, actual);
+}
+
+TEST(PersistentFiltersEndToEnd, ColumnRange) {
+  auto const* const table_name =
+      "projects/test/instances/filter_test/tables/test";
+  std::vector<std::string> column_families = {"family1", "family2", "family3"};
+  auto maybe_table = CreateTable(table_name, column_families, true);
+  ASSERT_STATUS_OK(maybe_table);
+  auto& table = maybe_table.value();
+
+  std::vector<SetCellParams> created = {
+      {"family1", "a00", 0, "bar"}, {"family1", "b00", 0, "bar"},
+      {"family1", "b01", 0, "bar"}, {"family1", "b02", 0, "bar"},
+      {"family2", "a00", 0, "bar"}, {"family2", "b01", 0, "bar"},
+      {"family2", "b00", 0, "bar"}, {"family3", "a00", 0, "bar"},
+  };
+
+  std::string row_key = "column-range-row-key";
+  auto status = SetCells(table, table_name, row_key, created);
+  ASSERT_STATUS_OK(status);
+
+  auto all_rows_set = std::make_shared<StringRangeSet>(StringRangeSet::All());
+  RowFilter filter;
+  filter.mutable_column_range_filter()->set_family_name("family1");
+  filter.mutable_column_range_filter()->set_start_qualifier_closed("b00");
+  filter.mutable_column_range_filter()->set_end_qualifier_open("b02");
+  auto utilities = table->GetUtilities();
+  auto maybe_stream = utilities->CreateCellStream(all_rows_set, filter);
+  ASSERT_STATUS_OK(maybe_stream);
+  std::vector<TestCell> expected = {
+      {row_key, "family1", "b00", 0_ms, "bar"},
+      {row_key, "family1", "b01", 0_ms, "bar"},
+  };
+
+  std::vector<TestCell> actual;
+  auto& stream = *maybe_stream;
+  for (; stream; ++stream) {
+    actual.emplace_back(stream->row_key(), stream->column_family(),
+                        stream->column_qualifier(), stream->timestamp(),
+                        stream->value());
+  }
+  ASSERT_EQ(expected, actual);
+
+  std::filesystem::remove_all("/tmp/projects");
 }
 
 }  // namespace emulator

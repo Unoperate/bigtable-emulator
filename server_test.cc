@@ -41,7 +41,7 @@ class ServerTest : public ::testing::Test {
   grpc::ClientContext ctx_;
 
   void SetUp() override {
-    auto maybe_server = CreateDefaultEmulatorServer("127.0.0.1", 0);
+    auto maybe_server = CreateDefaultEmulatorServer("127.0.0.1", 0, false);
     ASSERT_STATUS_OK(maybe_server);
     server_ = std::move(maybe_server.value());
     channel_ = grpc::CreateChannel(
@@ -227,7 +227,8 @@ TEST_F(ServerTest, TableAdminUpdateTable) {
 
 // Test that the failure path for server creation does not crash.
 TEST(ServerCreationTest, TestServerCreationFailurePath) {
-  auto maybe_server = CreateDefaultEmulatorServer("invalid_host_address", 0);
+  auto maybe_server =
+      CreateDefaultEmulatorServer("invalid_host_address", 0, false);
   ASSERT_EQ(false, maybe_server.ok());
 }
 

@@ -15,9 +15,9 @@
 #ifndef GOOGLE_CLOUD_CPP_GOOGLE_CLOUD_BIGTABLE_EMULATOR_TEST_UTIL_H
 #define GOOGLE_CLOUD_CPP_GOOGLE_CLOUD_BIGTABLE_EMULATOR_TEST_UTIL_H
 
-#include "table.h"
 #include "google/cloud/status.h"
 #include "google/cloud/status_or.h"
+#include "table.h"
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -41,7 +41,35 @@ Status SetCells(
     std::vector<SetCellParams>& set_cell_params);
 
 StatusOr<std::shared_ptr<Table>> CreateTable(
-    std::string const& table_name, std::vector<std::string>& column_families);
+    std::string const& table_name, std::vector<std::string>& column_families,
+    bool should_persist);
+
+void DeletePersistentDB();
+
+::google::bigtable::admin::v2::Table CreateSchema(
+    std::string const& table_name,
+    std::map<std::string, ::google::bigtable::admin::v2::ColumnFamily> const&
+        column_families);
+
+Status HasPersistentCell(
+    std::shared_ptr<google::cloud::bigtable::emulator::Table>& table,
+    std::string const& column_family, std::string const& row_key,
+    std::string const& column_qualifier, int64_t timestamp_micros,
+    std::string const& value);
+
+Status HasInMemoryCell(
+    std::shared_ptr<google::cloud::bigtable::emulator::Table>& table,
+    std::string const& column_family, std::string const& row_key,
+    std::string const& column_qualifier, int64_t timestamp_micros,
+    std::string const& value);
+
+Status HasInMemoryRow(
+    std::shared_ptr<google::cloud::bigtable::emulator::Table>& table,
+    std::string const& column_family, std::string const& row_key);
+
+Status HasPersistentRow(
+    std::shared_ptr<google::cloud::bigtable::emulator::Table>& table,
+    std::string const& column_family, std::string const& row_key);
 
 }  // namespace emulator
 }  // namespace bigtable
