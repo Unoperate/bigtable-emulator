@@ -13,11 +13,13 @@
 // limitations under the License.
 
 #include "server.h"
-#include "cluster.h"
-#include "row_streamer.h"
-#include "to_grpc_status.h"
 #include "google/cloud/internal/make_status.h"
 #include "google/cloud/status_or.h"
+#include "absl/strings/str_cat.h"
+#include "backend.h"
+#include "registry.h"
+#include "row_streamer.h"
+#include "to_grpc_status.h"
 #include <google/bigtable/admin/v2/bigtable_table_admin.grpc.pb.h>
 #include <google/bigtable/admin/v2/bigtable_table_admin.pb.h>
 #include <google/bigtable/admin/v2/table.pb.h>
@@ -26,13 +28,13 @@
 #include <google/longrunning/operations.pb.h>
 #include <google/protobuf/empty.pb.h>
 #include <google/protobuf/util/time_util.h>
-#include "absl/strings/str_cat.h"
 #include <grpcpp/impl/call_op_set.h>
 #include <grpcpp/security/server_credentials.h>
 #include <grpcpp/server.h>
 #include <grpcpp/server_builder.h>
 #include <grpcpp/support/status.h>
 #include <grpcpp/support/sync_stream.h>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -47,93 +49,73 @@ namespace emulator {
 namespace btproto = ::google::bigtable::v2;
 namespace btadmin = ::google::bigtable::admin::v2;
 
+/// How long Shutdown() waits for running requests.
+constexpr std::chrono::seconds kShutdownGracePeriod(5);
+
 class EmulatorService final : public btproto::Bigtable::Service {
  public:
-  explicit EmulatorService(std::shared_ptr<Cluster> cluster)
-      : cluster_(std::move(cluster)) {}
+  explicit EmulatorService(std::shared_ptr<Registry> registry)
+      : registry_(std::move(registry)) {}
 
   grpc::Status ReadRows(
-      grpc::ServerContext* /* context */,
-      btproto::ReadRowsRequest const* request,
+      grpc::ServerContext* context, btproto::ReadRowsRequest const* request,
       grpc::ServerWriter<btproto::ReadRowsResponse>* writer) override {
-    auto maybe_table = cluster_->FindTable(request->table_name());
+    auto maybe_table = registry_->FindTable(request->table_name());
     if (!maybe_table) {
       return ToGrpcStatus(maybe_table.status());
     }
     RowStreamer row_streamer(*writer);
-    return ToGrpcStatus((*maybe_table)->ReadRows(*request, row_streamer));
+    return ToGrpcStatus(
+        (*maybe_table)->ReadRows(*request, row_streamer, *context));
   }
 
   grpc::Status SampleRowKeys(
       grpc::ServerContext* /* context */,
       btproto::SampleRowKeysRequest const* request,
       grpc::ServerWriter<btproto::SampleRowKeysResponse>* writer) override {
-    auto maybe_table = cluster_->FindTable(request->table_name());
+    auto maybe_table = registry_->FindTable(request->table_name());
     if (!maybe_table) {
       return ToGrpcStatus(maybe_table.status());
     }
 
     auto& table = maybe_table.value();
 
-    return ToGrpcStatus(table->SampleRowKeys(0.0001, writer));
+    return ToGrpcStatus(table->SampleRowKeys(writer));
   }
 
-  grpc::Status MutateRow(grpc::ServerContext* /* context */,
+  grpc::Status MutateRow(grpc::ServerContext* context,
                          btproto::MutateRowRequest const* request,
                          btproto::MutateRowResponse* /* response */) override {
-    auto maybe_table = cluster_->FindTable(request->table_name());
+    auto maybe_table = registry_->FindTable(request->table_name());
     if (!maybe_table) {
       return ToGrpcStatus(maybe_table.status());
     }
-    return ToGrpcStatus((*maybe_table)->MutateRow(*request));
+    return ToGrpcStatus(
+        (*maybe_table)->MutateRow(*request, context->deadline()));
   }
 
   grpc::Status MutateRows(
-      grpc::ServerContext* /* context */,
-      btproto::MutateRowsRequest const* request,
+      grpc::ServerContext* context, btproto::MutateRowsRequest const* request,
       grpc::ServerWriter<btproto::MutateRowsResponse>* writer) override {
-    auto maybe_table = cluster_->FindTable(request->table_name());
+    auto maybe_table = registry_->FindTable(request->table_name());
     if (!maybe_table) {
       return ToGrpcStatus(maybe_table.status());
     }
-
-    int64_t index = 0;
-    google::bigtable::v2::MutateRowsResponse response;
-
-    for (auto const& entry : request->entries()) {
-      response.Clear();
-
-      auto status = (*maybe_table)
-                        ->DoMutationsWithPossibleRollbackLocked(
-                            entry.row_key(), entry.mutations());
-
-      auto* response_entry = response.add_entries();
-      response_entry->set_index(index++);
-      auto* s = response_entry->mutable_status();
-      *s = ToGoogleRPCStatus(status);
-
-      if (index == request->entries_size()) {
-        auto opts = grpc::WriteOptions();
-        opts.set_last_message();
-        writer->WriteLast(response, opts);
-      } else {
-        writer->Write(response);
-      }
-    }
-
-    return grpc::Status::OK;
+    return ToGrpcStatus(
+        (*maybe_table)->MutateRows(*request, writer, context->deadline()));
   }
 
   grpc::Status CheckAndMutateRow(
-      grpc::ServerContext* /* context */,
+      grpc::ServerContext* context,
       btproto::CheckAndMutateRowRequest const* request,
       btproto::CheckAndMutateRowResponse* response) override {
-    auto maybe_table = cluster_->FindTable(request->table_name());
+    auto maybe_table = registry_->FindTable(request->table_name());
     if (!maybe_table) {
       return ToGrpcStatus(maybe_table.status());
     }
 
-    auto maybe_response = (*maybe_table)->CheckAndMutateRow(*request);
+    auto maybe_response =
+        (*maybe_table)->CheckAndMutateRow(*request, context->deadline());
     if (!maybe_response.ok()) {
       return ToGrpcStatus(maybe_response.status());
     }
@@ -151,15 +133,16 @@ class EmulatorService final : public btproto::Bigtable::Service {
   }
 
   grpc::Status ReadModifyWriteRow(
-      grpc::ServerContext* /* context */,
+      grpc::ServerContext* context,
       btproto::ReadModifyWriteRowRequest const* request,
       btproto::ReadModifyWriteRowResponse* response) override {
-    auto maybe_table = cluster_->FindTable(request->table_name());
+    auto maybe_table = registry_->FindTable(request->table_name());
     if (!maybe_table) {
       return ToGrpcStatus(maybe_table.status());
     }
 
-    auto maybe_response = (*maybe_table)->ReadModifyWriteRow(*request);
+    auto maybe_response =
+        (*maybe_table)->ReadModifyWriteRow(*request, context->deadline());
     if (!maybe_response) {
       return ToGrpcStatus(maybe_response.status());
     }
@@ -170,18 +153,18 @@ class EmulatorService final : public btproto::Bigtable::Service {
   }
 
  private:
-  std::shared_ptr<Cluster> cluster_;
+  std::shared_ptr<Registry> registry_;
 };
 
 class EmulatorTableService final : public btadmin::BigtableTableAdmin::Service {
  public:
-  explicit EmulatorTableService(std::shared_ptr<Cluster> cluster)
-      : cluster_(std::move(cluster)) {}
+  explicit EmulatorTableService(std::shared_ptr<Registry> registry)
+      : registry_(std::move(registry)) {}
   grpc::Status CreateTable(grpc::ServerContext* /* context */,
                            btadmin::CreateTableRequest const* request,
                            btadmin::Table* response) override {
     auto table_name = request->parent() + "/tables/" + request->table_id();
-    auto maybe_table = cluster_->CreateTable(table_name, request->table());
+    auto maybe_table = registry_->CreateTable(table_name, request->table());
     if (!maybe_table) {
       return ToGrpcStatus(maybe_table.status());
     }
@@ -198,7 +181,7 @@ class EmulatorTableService final : public btadmin::BigtableTableAdmin::Service {
           GCP_ERROR_INFO().WithMetadata("page_token", request->page_token())));
     }
     auto maybe_tables =
-        cluster_->ListTables(request->parent(), request->view());
+        registry_->ListTables(request->parent(), request->view());
     if (!maybe_tables) {
       return ToGrpcStatus(maybe_tables.status());
     }
@@ -222,7 +205,7 @@ class EmulatorTableService final : public btadmin::BigtableTableAdmin::Service {
   grpc::Status GetTable(grpc::ServerContext* /* context */,
                         btadmin::GetTableRequest const* request,
                         btadmin::Table* response) override {
-    auto maybe_table = cluster_->GetTable(request->name(), request->view());
+    auto maybe_table = registry_->GetTable(request->name(), request->view());
     if (!maybe_table) {
       return ToGrpcStatus(maybe_table.status());
     }
@@ -233,12 +216,8 @@ class EmulatorTableService final : public btadmin::BigtableTableAdmin::Service {
   grpc::Status UpdateTable(grpc::ServerContext* /* context */,
                            btadmin::UpdateTableRequest const* request,
                            google::longrunning::Operation* response) override {
-    auto maybe_table = cluster_->FindTable(request->table().name());
-    if (!maybe_table) {
-      return ToGrpcStatus(maybe_table.status());
-    }
     auto status =
-        (*maybe_table)->Update(request->table(), request->update_mask());
+        registry_->UpdateTable(request->table(), request->update_mask());
     if (!status.ok()) {
       return ToGrpcStatus(status);
     }
@@ -259,18 +238,14 @@ class EmulatorTableService final : public btadmin::BigtableTableAdmin::Service {
   grpc::Status DeleteTable(grpc::ServerContext* /* context */,
                            btadmin::DeleteTableRequest const* request,
                            google::protobuf::Empty* /* response */) override {
-    return ToGrpcStatus(cluster_->DeleteTable(request->name()));
+    return ToGrpcStatus(registry_->DeleteTable(request->name()));
   }
 
   grpc::Status ModifyColumnFamilies(
       grpc::ServerContext* /* context */,
       btadmin::ModifyColumnFamiliesRequest const* request,
       btadmin::Table* response) override {
-    auto maybe_table = cluster_->FindTable(request->name());
-    if (!maybe_table) {
-      return ToGrpcStatus(maybe_table.status());
-    }
-    auto maybe_table_res = (*maybe_table)->ModifyColumnFamilies(*request);
+    auto maybe_table_res = registry_->ModifyColumnFamilies(*request);
     if (!maybe_table_res) {
       return ToGrpcStatus(maybe_table_res.status());
     }
@@ -282,12 +257,7 @@ class EmulatorTableService final : public btadmin::BigtableTableAdmin::Service {
   grpc::Status DropRowRange(grpc::ServerContext* /* context */,
                             btadmin::DropRowRangeRequest const* request,
                             google::protobuf::Empty* /* response */) override {
-    auto maybe_table = cluster_->FindTable(request->name());
-    if (!maybe_table) {
-      return ToGrpcStatus(maybe_table.status());
-    }
-
-    auto status = (*maybe_table)->DropRowRange(*request);
+    auto status = registry_->DropRowRange(*request);
     if (!status.ok()) {
       return ToGrpcStatus(status);
     }
@@ -299,10 +269,9 @@ class EmulatorTableService final : public btadmin::BigtableTableAdmin::Service {
       grpc::ServerContext* /* context */,
       btadmin::GenerateConsistencyTokenRequest const* request,
       btadmin::GenerateConsistencyTokenResponse* response) override {
-    if (!cluster_->HasTable(request->name())) {
-      return ToGrpcStatus(NotFoundError(
-          "Table does not exist.",
-          GCP_ERROR_INFO().WithMetadata("table_name", request->name())));
+    auto status = registry_->CheckTableExists(request->name());
+    if (!status.ok()) {
+      return ToGrpcStatus(status);
     }
     response->set_consistency_token("some fake token");
     return grpc::Status::OK;
@@ -312,10 +281,9 @@ class EmulatorTableService final : public btadmin::BigtableTableAdmin::Service {
       grpc::ServerContext* /* context */,
       btadmin::CheckConsistencyRequest const* request,
       btadmin::CheckConsistencyResponse* response) override {
-    if (!cluster_->HasTable(request->name())) {
-      return ToGrpcStatus(NotFoundError(
-          "Table does not exist.",
-          GCP_ERROR_INFO().WithMetadata("table_name", request->name())));
+    auto status = registry_->CheckTableExists(request->name());
+    if (!status.ok()) {
+      return ToGrpcStatus(status);
     }
     if (request->consistency_token() != "some fake token") {
       return ToGrpcStatus(NotFoundError(
@@ -329,16 +297,39 @@ class EmulatorTableService final : public btadmin::BigtableTableAdmin::Service {
   }
 
  private:
-  std::shared_ptr<Cluster> cluster_;
+  std::shared_ptr<Registry> registry_;
 };
 
 class DefaultEmulatorServer : public EmulatorServer {
  public:
-  DefaultEmulatorServer(std::string const& host, std::uint16_t port)
+  static StatusOr<std::unique_ptr<DefaultEmulatorServer>> Create(
+      std::string const& host, std::uint16_t port,
+      BackendOptions const& options) {
+    auto maybe_backend = Backend::Create(options);
+    if (!maybe_backend) {
+      return maybe_backend.status();
+    }
+    auto maybe_registry = Registry::Create(*std::move(maybe_backend));
+    if (!maybe_registry) {
+      return maybe_registry.status();
+    }
+    auto server = std::make_unique<DefaultEmulatorServer>(
+        host, port, *std::move(maybe_registry));
+    if (!server->server_) {
+      return UnknownError("An unknown error occurred when starting server",
+                          GCP_ERROR_INFO()
+                              .WithMetadata("host", host)
+                              .WithMetadata("port", absl::StrCat("%d", port)));
+    }
+    return server;
+  }
+
+  DefaultEmulatorServer(std::string const& host, std::uint16_t port,
+                        std::shared_ptr<Registry> registry)
       : bound_port_(port),
-        cluster_(std::make_shared<Cluster>()),
-        bt_service_(cluster_),
-        table_service_(cluster_) {
+        registry_(std::move(registry)),
+        bt_service_(registry_),
+        table_service_(registry_) {
     builder_.AddListeningPort(host + ":" + std::to_string(port),
                               grpc::InsecureServerCredentials(), &bound_port_);
     builder_.SetMaxReceiveMessageSize(256 * 1024 * 1024);
@@ -347,13 +338,15 @@ class DefaultEmulatorServer : public EmulatorServer {
     server_ = builder_.BuildAndStart();
   }
   int bound_port() override { return bound_port_; }
-  void Shutdown() override { server_->Shutdown(); }
+  Status Shutdown() override {
+    server_->Shutdown(std::chrono::system_clock::now() + kShutdownGracePeriod);
+    return registry_->Shutdown();
+  }
   void Wait() override { server_->Wait(); }
-  bool HasValidServer() { return static_cast<bool>(server_); }
 
  private:
   int bound_port_;
-  std::shared_ptr<Cluster> cluster_;
+  std::shared_ptr<Registry> registry_;
   EmulatorService bt_service_;
   EmulatorTableService table_service_;
   grpc::ServerBuilder builder_;
@@ -361,16 +354,13 @@ class DefaultEmulatorServer : public EmulatorServer {
 };
 
 StatusOr<std::unique_ptr<EmulatorServer>> CreateDefaultEmulatorServer(
-    std::string const& host, std::uint16_t port) {
-  auto* default_emulator_server = new DefaultEmulatorServer(host, port);
-  if (!default_emulator_server->HasValidServer()) {
-    return UnknownError("An unknown error occurred when starting server",
-                        GCP_ERROR_INFO()
-                            .WithMetadata("host", host)
-                            .WithMetadata("port", absl::StrCat("%d", port)));
+    std::string const& host, std::uint16_t port,
+    BackendOptions const& options) {
+  auto maybe_server = DefaultEmulatorServer::Create(host, port, options);
+  if (!maybe_server) {
+    return maybe_server.status();
   }
-
-  return std::unique_ptr<EmulatorServer>(default_emulator_server);
+  return std::unique_ptr<EmulatorServer>(*std::move(maybe_server));
 }
 
 }  // namespace emulator

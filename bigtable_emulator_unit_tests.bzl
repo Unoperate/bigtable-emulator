@@ -13,13 +13,18 @@
 # limitations under the License.
 
 bigtable_emulator_unit_tests = [
-    "column_family_test.cc",
     "conditional_mutations_test.cc",
     "drop_row_range_test.cc",
     "filter_test.cc",
     "filtered_map_test.cc",
+    "in_memory/in_memory_column_family_test.cc",
     "mutations_test.cc",
+    "persistent/key_coder_test.cc",
+    "persistent/persistent_filter_test.cc",
+    "persistent/persistent_modify_column_families_test.cc",
+    "persistent/persistent_transaction_concurrency_test.cc",
     "range_set_test.cc",
+    "recovery_test.cc",
     "server_test.cc",
     "table_test.cc",
 ]
