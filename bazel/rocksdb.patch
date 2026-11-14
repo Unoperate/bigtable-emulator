@@ -1,0 +1,44 @@
+diff --git a/db/blob/blob_file_meta.h b/db/blob/blob_file_meta.h
+--- a/db/blob/blob_file_meta.h
++++ b/db/blob/blob_file_meta.h
+@@ -6,6 +6,7 @@
+ #pragma once
+ 
+ #include <cassert>
++#include <cstdint>
+ #include <iosfwd>
+ #include <memory>
+ #include <string>
+diff --git a/include/rocksdb/trace_record.h b/include/rocksdb/trace_record.h
+--- a/include/rocksdb/trace_record.h
++++ b/include/rocksdb/trace_record.h
+@@ -5,6 +5,7 @@
+ 
+ #pragma once
+ 
++#include <cstdint>
+ #include <memory>
+ #include <string>
+ #include <vector>
+diff --git a/include/rocksdb/trace_record_result.h b/include/rocksdb/trace_record_result.h
+--- a/include/rocksdb/trace_record_result.h
++++ b/include/rocksdb/trace_record_result.h
+@@ -5,6 +5,7 @@
+ 
+ #pragma once
+ 
++#include <cstdint>
+ #include <string>
+ #include <vector>
+ 
+diff --git a/include/rocksdb/write_batch_base.h b/include/rocksdb/write_batch_base.h
+--- a/include/rocksdb/write_batch_base.h
++++ b/include/rocksdb/write_batch_base.h
+@@ -9,6 +9,7 @@
+ #pragma once
+ 
+ #include <cstddef>
++#include <cstdint>
+ 
+ #include "rocksdb/attribute_groups.h"
+ #include "rocksdb/rocksdb_namespace.h"

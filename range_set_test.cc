@@ -538,14 +538,13 @@ TEST(TimestampRangeSet, FromInfiniteTimestampRange) {
 }
 
 TEST(TimestampRangeSet, FromFiniteTimestampRange) {
-  using testing_util::chrono_literals::operator""_ms;
   google::bigtable::v2::TimestampRange proto;
   proto.set_start_timestamp_micros(1234);
   proto.set_end_timestamp_micros(123456789);
   auto finite = TimestampRangeSet::Range::FromTimestampRange(proto);
   ASSERT_STATUS_OK(finite);
-  EXPECT_EQ(1_ms, finite->start());
-  EXPECT_EQ(123456_ms, finite->end());
+  EXPECT_EQ(std::chrono::microseconds(1234), finite->start());
+  EXPECT_EQ(std::chrono::microseconds(123456789), finite->end());
 }
 
 TEST(TimestampRangeSet, RangeStartLess) {
@@ -632,12 +631,12 @@ TEST(TimestampRangeSet, RangePrint) {
   {
     std::stringstream os;
     os << TimestampRangeSet::Range(1_ms, 3_ms);
-    EXPECT_EQ("[1ms,3ms)", os.str());
+    EXPECT_EQ("[1000us,3000us)", os.str());
   }
   {
     std::stringstream os;
     os << TimestampRangeSet::Range(1_ms, 0_ms);
-    EXPECT_EQ("[1ms,inf)", os.str());
+    EXPECT_EQ("[1000us,inf)", os.str());
   }
 }
 

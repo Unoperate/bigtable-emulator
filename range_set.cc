@@ -16,8 +16,8 @@
 #include "google/cloud/bigtable/internal/google_bytes_traits.h"
 #include "google/cloud/internal/make_status.h"
 #include "google/cloud/status_or.h"
-#include <google/bigtable/v2/data.pb.h>
 #include "absl/types/variant.h"
+#include <google/bigtable/v2/data.pb.h>
 #include <algorithm>
 #include <cassert>
 #include <chrono>
@@ -489,16 +489,16 @@ std::ostream& operator<<(std::ostream& os, StringRangeSet::Range const& range) {
 
 TimestampRangeSet::Range::Range(Value start, Value end)
     : start_(std::move(start)), end_(std::move(end)) {
-  assert(end_ == std::chrono::milliseconds::zero() || start_ <= end_);
+  assert(end_ == std::chrono::microseconds::zero() || start_ <= end_);
 }
 
 StatusOr<TimestampRangeSet::Range> TimestampRangeSet::Range::FromTimestampRange(
     google::bigtable::v2::TimestampRange const& timestamp_range) {
-  auto start = std::chrono::duration_cast<std::chrono::milliseconds>(
-      std::chrono::microseconds(timestamp_range.start_timestamp_micros()));
-  auto end = std::chrono::duration_cast<std::chrono::milliseconds>(
-      std::chrono::microseconds(timestamp_range.end_timestamp_micros()));
-  if (end != std::chrono::milliseconds::zero() && start > end) {
+  auto const start =
+      std::chrono::microseconds(timestamp_range.start_timestamp_micros());
+  auto const end =
+      std::chrono::microseconds(timestamp_range.end_timestamp_micros());
+  if (end != std::chrono::microseconds::zero() && start > end) {
     return InvalidArgumentError(
         "reversed `timestamp_range`",
         GCP_ERROR_INFO().WithMetadata("timestamp_range",
@@ -508,7 +508,7 @@ StatusOr<TimestampRangeSet::Range> TimestampRangeSet::Range::FromTimestampRange(
 }
 
 bool TimestampRangeSet::Range::IsAboveEnd(Value value) const {
-  return end_ != std::chrono::milliseconds::zero() && value >= end_;
+  return end_ != std::chrono::microseconds::zero() && value >= end_;
 }
 
 bool TimestampRangeSet::Range::IsWithin(Value value) const {
@@ -517,7 +517,7 @@ bool TimestampRangeSet::Range::IsWithin(Value value) const {
 
 bool TimestampRangeSet::Range::IsEmpty(TimestampRangeSet::Range::Value start,
                                        TimestampRangeSet::Range::Value end) {
-  if (end == std::chrono::milliseconds::zero()) {
+  if (end == std::chrono::microseconds::zero()) {
     return false;
   }
   return start >= end;
@@ -530,10 +530,10 @@ bool TimestampRangeSet::Range::StartLess::operator()(Range const& lhs,
 
 bool TimestampRangeSet::Range::EndLess::operator()(Range const& lhs,
                                                    Range const& rhs) const {
-  if (lhs.end() == std::chrono::milliseconds::zero()) {
+  if (lhs.end() == std::chrono::microseconds::zero()) {
     return false;
   }
-  if (rhs.end() == std::chrono::milliseconds::zero()) {
+  if (rhs.end() == std::chrono::microseconds::zero()) {
     return true;
   }
   return lhs.end() < rhs.end();
@@ -541,7 +541,7 @@ bool TimestampRangeSet::Range::EndLess::operator()(Range const& lhs,
 
 TimestampRangeSet TimestampRangeSet::All() {
   TimestampRangeSet res;
-  res.Sum(Range(std::chrono::milliseconds(0), std::chrono::milliseconds(0)));
+  res.Sum(Range(std::chrono::microseconds(0), std::chrono::microseconds(0)));
   return res;
 }
 
@@ -563,11 +563,11 @@ bool operator==(TimestampRangeSet::Range const& lhs,
 
 std::ostream& operator<<(std::ostream& os,
                          TimestampRangeSet::Range const& range) {
-  os << "[" << range.start().count() << "ms,";
-  if (range.end() == std::chrono::milliseconds::zero()) {
+  os << "[" << range.start().count() << "us,";
+  if (range.end() == std::chrono::microseconds::zero()) {
     os << "inf";
   } else {
-    os << range.end().count() << "ms";
+    os << range.end().count() << "us";
   }
   os << ")";
   return os;

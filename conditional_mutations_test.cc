@@ -1,15 +1,16 @@
-#include "table.h"
 #include "google/cloud/internal/make_status.h"
 #include "google/cloud/status.h"
 #include "google/cloud/status_or.h"
 #include "google/cloud/testing_util/status_matchers.h"
+#include "absl/strings/str_format.h"
+#include "table.h"
+#include "test_util.h"
 #include <google/bigtable/admin/v2/table.pb.h>
 #include <google/bigtable/v2/bigtable.pb.h>
 #include <google/bigtable/v2/data.pb.h>
-#include "absl/strings/str_format.h"
 #include <gtest/gtest.h>
-#include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -19,96 +20,28 @@ namespace cloud {
 namespace bigtable {
 namespace emulator {
 
-struct SetCellParams {
-  std::string column_family_name;
-  std::string column_qualifier;
-  int64_t timestamp_micros;
-  std::string data;
+std::string BackendName(::testing::TestParamInfo<bool> const& info) {
+  return info.param ? "Persistent" : "InMemory";
+}
+
+/// Runs each test on both backends; GetParam() is true for the persistent
+/// one.
+class ConditionalMutations : public ::testing::TestWithParam<bool> {
+ protected:
+  void SetUp() override {
+    std::filesystem::remove_all("/tmp/conditional_projects");
+  }
+  void TearDown() override {
+    std::filesystem::remove_all("/tmp/conditional_projects");
+  }
 };
 
-StatusOr<std::shared_ptr<Table>> CreateTable(
-    std::string const& table_name, std::vector<std::string>& column_families) {
-  ::google::bigtable::admin::v2::Table schema;
-  schema.set_name(table_name);
-  for (auto& column_family_name : column_families) {
-    (*schema.mutable_column_families())[column_family_name] =
-        ::google::bigtable::admin::v2::ColumnFamily();
-  }
+INSTANTIATE_TEST_SUITE_P(Backends, ConditionalMutations, ::testing::Bool(),
+                         BackendName);
 
-  return Table::Create(schema);
-}
-
-Status HasCell(std::shared_ptr<google::cloud::bigtable::emulator::Table>& table,
-               std::string const& column_family, std::string const& row_key,
-               std::string const& column_qualifier, int64_t timestamp_micros,
-               std::string const& value) {
-  auto column_family_it = table->find(column_family);
-  if (column_family_it == table->end()) {
-    return NotFoundError(
-        "column family not found in table",
-        GCP_ERROR_INFO().WithMetadata("column family", column_family));
-  }
-
-  auto const& cf = column_family_it->second;
-  auto column_family_row_it = cf->find(row_key);
-  if (column_family_row_it == cf->end()) {
-    return NotFoundError("no row key found in column family",
-                         GCP_ERROR_INFO()
-                             .WithMetadata("row key", row_key)
-                             .WithMetadata("column family", column_family));
-  }
-
-  auto& column_family_row = column_family_row_it->second;
-  auto column_row_it = column_family_row.find(column_qualifier);
-  if (column_row_it == column_family_row.end()) {
-    return NotFoundError(
-        "no column found with qualifier",
-        GCP_ERROR_INFO().WithMetadata("column qualifier", column_qualifier));
-  }
-
-  auto& column_row = column_row_it->second;
-  auto timestamp_it =
-      column_row.find(std::chrono::duration_cast<std::chrono::milliseconds>(
-          std::chrono::microseconds(timestamp_micros)));
-  if (timestamp_it == column_row.end()) {
-    return NotFoundError(
-        "timestamp not found",
-        GCP_ERROR_INFO().WithMetadata("timestamp",
-                                      absl::StrFormat("%d", timestamp_micros)));
-  }
-
-  if (timestamp_it->second != value) {
-    return NotFoundError("wrong value",
-                         GCP_ERROR_INFO()
-                             .WithMetadata("expected", value)
-                             .WithMetadata("found", timestamp_it->second));
-  }
-
-  return Status();
-}
-
-Status SetCells(
-    std::shared_ptr<google::cloud::bigtable::emulator::Table>& table,
-    std::string const& table_name, std::string const& row_key,
-    std::vector<SetCellParams>& set_cell_params) {
-  ::google::bigtable::v2::MutateRowRequest mutation_request;
-  mutation_request.set_table_name(table_name);
-  mutation_request.set_row_key(row_key);
-
-  for (auto m : set_cell_params) {
-    auto* mutation_request_mutation = mutation_request.add_mutations();
-    auto* set_cell_mutation = mutation_request_mutation->mutable_set_cell();
-    set_cell_mutation->set_family_name(m.column_family_name);
-    set_cell_mutation->set_column_qualifier(m.column_qualifier);
-    set_cell_mutation->set_timestamp_micros(m.timestamp_micros);
-    set_cell_mutation->set_value(m.data);
-  }
-
-  return table->MutateRow(mutation_request);
-}
-
-TEST(ConditionalMutations, TestTrueMutations) {
-  auto const* const table_name = "projects/test/instances/test/tables/test";
+TEST_P(ConditionalMutations, TestTrueMutations) {
+  auto const* const table_name =
+      "conditional_projects/test/instances/test/tables/test";
   auto const* const column_family_name = "test_column_family";
   auto const* const row_key = "0";
   auto const* const column_qualifier = "column_1";
@@ -117,11 +50,10 @@ TEST(ConditionalMutations, TestTrueMutations) {
   auto const* const false_mutation_value = "set by a false mutation";
 
   std::vector<std::string> column_families = {column_family_name};
-  auto maybe_table = CreateTable(table_name, column_families);
+  auto maybe_table = CreateTable(table_name, column_families, GetParam());
 
   ASSERT_STATUS_OK(maybe_table);
   auto table = maybe_table.value();
-
   ::google::bigtable::v2::Mutation true_mutation;
   auto* set_cell_mutation = true_mutation.mutable_set_cell();
   set_cell_mutation->set_family_name(column_family_name);
@@ -158,7 +90,8 @@ TEST(ConditionalMutations, TestTrueMutations) {
   cond_mut_with_pass_all.mutable_false_mutations()->Assign(
       false_mutations.begin(), false_mutations.end());
 
-  auto status_or = table->CheckAndMutateRow(cond_mut_with_pass_all);
+  auto status_or =
+      table->CheckAndMutateRow(cond_mut_with_pass_all, kNoDeadline);
   ASSERT_STATUS_OK(status_or);
 
   // pass_all_filter means that true_mutation should have succeeded,
@@ -172,8 +105,9 @@ TEST(ConditionalMutations, TestTrueMutations) {
                        .ok());
 }
 
-TEST(ConditionalMutations, RejectInvalidRequest) {
-  auto const* const table_name = "projects/test/instances/test/tables/test";
+TEST_P(ConditionalMutations, RejectInvalidRequest) {
+  auto const* const table_name =
+      "conditional_projects/test/instances/test/tables/test";
   auto const* const column_family_name = "test_column_family";
   auto const* const row_key = "0";
   auto const* const column_qualifier = "column_1";
@@ -182,7 +116,7 @@ TEST(ConditionalMutations, RejectInvalidRequest) {
   auto const* const false_mutation_value = "set by a false mutation";
 
   std::vector<std::string> column_families = {column_family_name};
-  auto maybe_table = CreateTable(table_name, column_families);
+  auto maybe_table = CreateTable(table_name, column_families, GetParam());
 
   ASSERT_STATUS_OK(maybe_table);
   auto table = maybe_table.value();
@@ -215,7 +149,8 @@ TEST(ConditionalMutations, RejectInvalidRequest) {
   cond_mutation_no_row_key.mutable_false_mutations()->Assign(
       false_mutations.begin(), false_mutations.end());
 
-  auto status_or = table->CheckAndMutateRow(cond_mutation_no_row_key);
+  auto status_or =
+      table->CheckAndMutateRow(cond_mutation_no_row_key, kNoDeadline);
   ASSERT_EQ(false, status_or.ok());
 
   // Will be configured so that both true_mutations and
@@ -223,7 +158,9 @@ TEST(ConditionalMutations, RejectInvalidRequest) {
   google::bigtable::v2::CheckAndMutateRowRequest cond_mutation_no_mutations;
   cond_mutation_no_mutations.set_row_key(row_key);
   cond_mutation_no_row_key.set_table_name(table_name);
-  ASSERT_EQ(false, table->CheckAndMutateRow(cond_mutation_no_mutations).ok());
+  ASSERT_EQ(
+      false,
+      table->CheckAndMutateRow(cond_mutation_no_mutations, kNoDeadline).ok());
 }
 
 }  // namespace emulator

@@ -23,7 +23,9 @@ cc_library(
     srcs = bigtable_emulator_common_srcs,
     hdrs = bigtable_emulator_common_hdrs,
     deps = [
+        "@com_google_absl//absl/synchronization",
         "@google_cloud_cpp//google/cloud/bigtable:google_cloud_cpp_bigtable",
+        "@rocksdb",
     ],
 )
 
@@ -38,7 +40,6 @@ cc_binary(
         "@com_google_absl//absl/flags:parse",
         "@com_google_protobuf//:protobuf",
         "@google_cloud_cpp//:grpc_utils",
-        "@google_cloud_cpp//google/cloud/bigtable:google_cloud_cpp_bigtable",
     ],
 )
 

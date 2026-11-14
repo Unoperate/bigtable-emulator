@@ -1,6 +1,7 @@
-# Single node, Memory Only Emulator for Google Bigtable
+# Single node Emulator for Google Bigtable
 
-This is a single-node, non-persistent emulator for Google's Bigtable.
+This is a single-node emulator for Google's Bigtable. It keeps the tables in
+memory, or on disk when started with a data directory provided.
 
 It should pass all the integration tests in Google's C++ client
 repository (google-cloud-cpp), except those that must run against
@@ -38,7 +39,7 @@ bazel build --config clang-tidy //...
 ## Running the Emulator
 
 ```shell
-bigtable-emulator -p <port>
+bigtable-emulator -p <port> [--data_dir=<dir>]
 ```
 
 ## Development
@@ -47,6 +48,12 @@ bigtable-emulator -p <port>
 ```bash
 # On bash you neet to enable globstar with `shopt -s globstar` first
 clang-format -i -style=file -assume-filename=.clang-format **/*.cc **/*.h
+```
+
+### `compile_commands.json`
+If you need to generate `compile_commands.json` for your tooling, run:
+```shell
+bazel run --config=compile-commands
 ```
 
 ## Contributing changes
