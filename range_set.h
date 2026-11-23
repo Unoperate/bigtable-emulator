@@ -139,7 +139,7 @@ class TimestampRangeSet {
  public:
   class Range {
    public:
-    using Value = std::chrono::milliseconds;
+    using Value = std::chrono::microseconds;
 
     Range(Value start, Value end);
     static StatusOr<Range> FromTimestampRange(

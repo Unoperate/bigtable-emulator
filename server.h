@@ -15,7 +15,9 @@
 #ifndef GOOGLE_CLOUD_CPP_GOOGLE_CLOUD_BIGTABLE_EMULATOR_SERVER_H
 #define GOOGLE_CLOUD_CPP_GOOGLE_CLOUD_BIGTABLE_EMULATOR_SERVER_H
 
+#include "google/cloud/status.h"
 #include "google/cloud/status_or.h"
+#include "backend.h"
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -31,14 +33,14 @@ class EmulatorServer {
 
   /// Return the port to which the server bound.
   virtual int bound_port() = 0;
-  /// Initiate shutting the server down.
-  virtual void Shutdown() = 0;
+  /// Stops serving, then closes every table.
+  virtual Status Shutdown() = 0;
   /// Wait until the server shuts down.
   virtual void Wait() = 0;
 };
 
 StatusOr<std::unique_ptr<EmulatorServer>> CreateDefaultEmulatorServer(
-    std::string const& host, std::uint16_t port);
+    std::string const& host, std::uint16_t port, BackendOptions const& options);
 
 }  // namespace emulator
 }  // namespace bigtable

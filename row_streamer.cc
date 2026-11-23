@@ -13,9 +13,9 @@
 // limitations under the License.
 
 #include "row_streamer.h"
+#include "absl/types/optional.h"
 #include "cell_view.h"
 #include <google/bigtable/v2/bigtable.pb.h>
-#include "absl/types/optional.h"
 #include <chrono>
 #include <utility>
 
@@ -52,9 +52,7 @@ bool RowStreamer::Stream(CellView const& cell) {
     current_column_qualifier_ = cell.column_qualifier();
     chunk.mutable_qualifier()->set_value(cell.column_qualifier());
   }
-  chunk.set_timestamp_micros(
-      std::chrono::duration_cast<std::chrono::microseconds>(cell.timestamp())
-          .count());
+  chunk.set_timestamp_micros(cell.timestamp().count());
   chunk.set_value(cell.value());
   if (cell.HasLabel()) {
     *chunk.add_labels() = cell.label();

@@ -25,7 +25,7 @@ bazel_dep(name = "bazel_skylib", version = "1.7.1")
 bazel_dep(name = "rules_cc", version = "0.0.17")
 bazel_dep(name = "abseil-cpp", version = "20240722.1", repo_name = "com_google_absl")
 bazel_dep(name = "protobuf", version = "29.4", repo_name = "com_google_protobuf")
-bazel_dep(name = "boringssl", version = "0.0.0-20230215-5c22014")
+bazel_dep(name = "boringssl", version = "0.20250114.0")
 bazel_dep(name = "grpc", version = "1.69.0", repo_name = "com_github_grpc_grpc")
 bazel_dep(name = "nlohmann_json", version = "3.11.3", repo_name = "com_github_nlohmann_json")
 bazel_dep(name = "curl", version = "8.8.0.bcr.3", repo_name = "com_github_curl_curl")
@@ -76,13 +76,28 @@ git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl", "g
 git_repository(
     name = "google_cloud_cpp",
     commit = "fbc58d69eabbfdd773b92838e731842b8019c5dc",
-    remote = "https://github.com/googleapis/google-cloud-cpp.git",
-    patches = ["//bazel:google_cloud_cpp.patch"],
     patch_args = ["-p1"],
+    patches = ["//bazel:google_cloud_cpp.patch"],
+    remote = "https://github.com/googleapis/google-cloud-cpp.git",
+)
+
+bazel_dep(name = "rocksdb", version = "9.11.2")
+single_version_override(
+    module_name = "rocksdb",
+    patch_strip = 1,
+    patches = ["//bazel:rocksdb.patch"],
 )
 
 git_repository(
     name = "bazel_clang_tidy",
     commit = "496018e020cf0a7d813a2b5a9d246ec55340a7ed",
     remote = "https://github.com/erenon/bazel_clang_tidy.git",
+)
+
+# FIXME: switch to hedronvision/bazel-compile-commands-extractor once https://github.com/hedronvision/bazel-compile-commands-extractor/pull/219 lands
+bazel_dep(name = "hedron_compile_commands", dev_dependency = True)
+git_override(
+    module_name = "hedron_compile_commands",
+    remote = "https://github.com/mikael-s-persson/bazel-compile-commands-extractor.git",
+    commit = "02d15621b528efd877f5d5657c4b738523a0eb17",
 )

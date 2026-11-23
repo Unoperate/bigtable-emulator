@@ -35,7 +35,7 @@ class CellView {
  public:
   CellView(std::string const& row_key, std::string const& column_family,
            std::string const& column_qualifier,
-           std::chrono::milliseconds timestamp, std::string const& value)
+           std::chrono::microseconds timestamp, std::string const& value)
       : row_key_(row_key),
         column_family_(column_family),
         column_qualifier_(column_qualifier),
@@ -47,7 +47,7 @@ class CellView {
   std::string const& column_qualifier() const {
     return column_qualifier_.get();
   }
-  std::chrono::milliseconds timestamp() const { return timestamp_; }
+  std::chrono::microseconds timestamp() const { return timestamp_; }
   std::string const& value() const { return value_.get(); }
   bool HasLabel() const { return label_.has_value(); }
   std::string const& label() const { return label_.value().get(); }
@@ -58,7 +58,7 @@ class CellView {
   std::reference_wrapper<std::string const> row_key_;
   std::reference_wrapper<std::string const> column_family_;
   std::reference_wrapper<std::string const> column_qualifier_;
-  std::chrono::milliseconds timestamp_;
+  std::chrono::microseconds timestamp_;
   std::reference_wrapper<std::string const> value_;
   absl::optional<std::reference_wrapper<std::string const>> label_;
 };

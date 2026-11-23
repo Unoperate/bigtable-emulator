@@ -21,6 +21,8 @@ namespace cloud {
 namespace bigtable {
 namespace emulator {
 constexpr std::size_t kMaxRowLen = 2 << 11;
+constexpr std::size_t kMaxTablesPerInstance = 1000;
+constexpr std::size_t kMaxColumnFamiliesPerTable = 100;
 }  // namespace emulator
 }  // namespace bigtable
 }  // namespace cloud

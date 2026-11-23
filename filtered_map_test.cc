@@ -14,8 +14,8 @@
 
 #include "filtered_map.h"
 #include "google/cloud/testing_util/chrono_literals.h"
-#include <gtest/gtest.h>
 #include "re2/re2.h"
+#include <gtest/gtest.h>
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -58,8 +58,8 @@ std::vector<std::string> Vec(std::initializer_list<char const*> const& v) {
 }
 
 template <typename Map>
-std::vector<std::chrono::milliseconds> TSKeys(Map const& map) {
-  std::vector<std::chrono::milliseconds> res;
+std::vector<std::chrono::microseconds> TSKeys(Map const& map) {
+  std::vector<std::chrono::microseconds> res;
   std::transform(map.begin(), map.end(), std::back_inserter(res),
                  [](typename Map::const_iterator::value_type const& elem) {
                    return elem.first;
@@ -151,53 +151,53 @@ TEST(StringRangeFilteredMapView, MultipleFilters) {
 }
 
 TEST(TimestampRangeFilteredMapView, NoFilter) {
-  std::map<std::chrono::milliseconds, int, std::greater<>> unfiltered{
+  std::map<std::chrono::microseconds, int, std::greater<>> unfiltered{
       {0_ms, 0}, {1_ms, 1}, {2_ms, 2}};
   auto filter = TimestampRangeSet::All();
   TimestampRangeFilteredMapView<decltype(unfiltered)> filtered(unfiltered,
                                                                filter);
-  EXPECT_EQ(std::vector<std::chrono::milliseconds>({2_ms, 1_ms, 0_ms}),
+  EXPECT_EQ(std::vector<std::chrono::microseconds>({2_ms, 1_ms, 0_ms}),
             TSKeys(filtered));
 }
 
 TEST(TimestampRangeFilteredMapView, EmptyFilter) {
-  std::map<std::chrono::milliseconds, int, std::greater<>> unfiltered{
+  std::map<std::chrono::microseconds, int, std::greater<>> unfiltered{
       {0_ms, 0}, {1_ms, 1}, {2_ms, 2}};
   auto filter = TimestampRangeSet::Empty();
   TimestampRangeFilteredMapView<decltype(unfiltered)> filtered(unfiltered,
                                                                filter);
-  EXPECT_EQ(std::vector<std::chrono::milliseconds>({}), TSKeys(filtered));
+  EXPECT_EQ(std::vector<std::chrono::microseconds>({}), TSKeys(filtered));
 }
 
 TEST(TimestampRangeFilteredMapView, FiniteRange) {
-  std::map<std::chrono::milliseconds, int, std::greater<>> unfiltered{
+  std::map<std::chrono::microseconds, int, std::greater<>> unfiltered{
       {0_ms, 0}, {1_ms, 0}, {2_ms, 0}, {3_ms, 0}, {4_ms, 0}};
   auto filter = TimestampRangeSet::Empty();
   filter.Sum(TimestampRangeSet::Range(1_ms, 3_ms));
   TimestampRangeFilteredMapView<decltype(unfiltered)> filtered(unfiltered,
                                                                filter);
-  EXPECT_EQ(std::vector<std::chrono::milliseconds>({2_ms, 1_ms}),
+  EXPECT_EQ(std::vector<std::chrono::microseconds>({2_ms, 1_ms}),
             TSKeys(filtered));
 }
 
 TEST(TimestampRangeFilteredMapView, InfiniteRange) {
-  std::map<std::chrono::milliseconds, int, std::greater<>> unfiltered{
+  std::map<std::chrono::microseconds, int, std::greater<>> unfiltered{
       {0_ms, 0}, {1_ms, 0}, {2_ms, 0}, {3_ms, 0}, {4_ms, 0}};
   auto filter = TimestampRangeSet::Empty();
   filter.Sum(TimestampRangeSet::Range(1_ms, 0_ms));
   TimestampRangeFilteredMapView<decltype(unfiltered)> filtered(unfiltered,
                                                                filter);
-  EXPECT_EQ(std::vector<std::chrono::milliseconds>({4_ms, 3_ms, 2_ms, 1_ms}),
+  EXPECT_EQ(std::vector<std::chrono::microseconds>({4_ms, 3_ms, 2_ms, 1_ms}),
             TSKeys(filtered));
 }
 
 TEST(TimestampRangeFilteredMapView, MultipleFilters) {
-  std::chrono::milliseconds max_millis(std::numeric_limits<int64_t>::max());
-  std::map<std::chrono::milliseconds, int, std::greater<>> unfiltered{
+  std::chrono::microseconds max_micros(std::numeric_limits<int64_t>::max());
+  std::map<std::chrono::microseconds, int, std::greater<>> unfiltered{
       {0_ms, 0},  {1_ms, 0},  {2_ms, 0},  {3_ms, 0},
       {4_ms, 0},  {5_ms, 0},  {6_ms, 0},  {7_ms, 0},
       {8_ms, 0},  {9_ms, 0},  {10_ms, 0}, {11_ms, 0},
-      {12_ms, 0}, {13_ms, 0}, {14_ms, 0}, {max_millis, 0},
+      {12_ms, 0}, {13_ms, 0}, {14_ms, 0}, {max_micros, 0},
   };
   auto filter = TimestampRangeSet::Empty();
   filter.Sum(TimestampRangeSet::Range(1_ms, 3_ms));
@@ -207,7 +207,7 @@ TEST(TimestampRangeFilteredMapView, MultipleFilters) {
   filter.Sum(TimestampRangeSet::Range(13_ms, 0_ms));
   TimestampRangeFilteredMapView<decltype(unfiltered)> filtered(unfiltered,
                                                                filter);
-  EXPECT_EQ(std::vector<std::chrono::milliseconds>({max_millis, 14_ms, 13_ms,
+  EXPECT_EQ(std::vector<std::chrono::microseconds>({max_micros, 14_ms, 13_ms,
                                                     11_ms, 10_ms, 7_ms, 6_ms,
                                                     4_ms, 3_ms, 2_ms, 1_ms}),
             TSKeys(filtered));
