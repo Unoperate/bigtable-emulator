@@ -26,14 +26,12 @@ bigtable_emulator_common_hdrs = [
     "persistent/key_coder.h",
     "persistent/persistent_backend.h",
     "persistent/persistent_column_family.h",
-    "persistent/redolog.h",
     "range_set.h",
     "registry.h",
     "row_streamer.h",
     "server.h",
     "table.h",
     "table_operations.h",
-    "test_util.h",
     "to_grpc_status.h",
 ]
 
@@ -47,13 +45,11 @@ bigtable_emulator_common_srcs = [
     "persistent/key_coder.cc",
     "persistent/persistent_backend.cc",
     "persistent/persistent_column_family.cc",
-    "persistent/redolog.cc",
     "range_set.cc",
     "registry.cc",
     "row_streamer.cc",
     "server.cc",
     "table.cc",
     "table_operations.cc",
-    "test_util.cc",
     "to_grpc_status.cc",
 ]

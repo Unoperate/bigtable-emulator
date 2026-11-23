@@ -29,19 +29,16 @@ namespace bigtable {
 namespace emulator {
 namespace {
 
+using ::google::cloud::testing_util::StatusIs;
+
 constexpr char const* kTableName =
     "persistent_modify_cf_projects/test/instances/test/tables/test";
-constexpr char const* kDataRoot = "/tmp/";
 
 class PersistentModifyColumnFamiliesTest : public ::testing::Test {
  protected:
-  void SetUp() override {
-    std::filesystem::remove_all("/tmp/persistent_modify_cf_projects");
-  }
+  void SetUp() override { std::filesystem::remove_all(TestDataDir()); }
 
-  void TearDown() override {
-    std::filesystem::remove_all("/tmp/persistent_modify_cf_projects");
-  }
+  void TearDown() override { std::filesystem::remove_all(TestDataDir()); }
 
   static StatusOr<std::shared_ptr<Table>> CreatePersistentTable(
       std::vector<std::string> const& column_families) {
@@ -56,6 +53,96 @@ class PersistentModifyColumnFamiliesTest : public ::testing::Test {
     return request;
   }
 };
+
+TEST_F(PersistentModifyColumnFamiliesTest,
+       FamilyNamedDefaultKeepsCellsAfterReopen) {
+  std::vector<std::string> initial_cfs = {"default"};
+  auto maybe_table = CreatePersistentTable(initial_cfs);
+  ASSERT_STATUS_OK(maybe_table);
+  auto table = maybe_table.value();
+  std::vector<SetCellParams> cells = {{"default", "c", 1000, "v"}};
+  ASSERT_STATUS_OK(SetCells(table, kTableName, "row", cells));
+  ASSERT_STATUS_OK(table->Close());
+  table.reset();
+
+  auto maybe_reopened = LoadTable(kTableName);
+  ASSERT_STATUS_OK(maybe_reopened);
+  auto reopened = maybe_reopened.value();
+  EXPECT_STATUS_OK(
+      HasPersistentCell(reopened, "default", "row", "c", 1000, "v"));
+}
+
+TEST_F(PersistentModifyColumnFamiliesTest,
+       DropAndRecreateInOneRequestEmptiesFamily) {
+  std::vector<std::string> initial_cfs = {"f"};
+  auto maybe_table = CreatePersistentTable(initial_cfs);
+  ASSERT_STATUS_OK(maybe_table);
+  auto table = maybe_table.value();
+  std::vector<SetCellParams> cells = {{"f", "c", 1000, "v"}};
+  ASSERT_STATUS_OK(SetCells(table, kTableName, "row", cells));
+
+  auto request = MakeModifyRequest();
+  auto* drop = request.add_modifications();
+  drop->set_id("f");
+  drop->set_drop(true);
+  auto* create = request.add_modifications();
+  create->set_id("f");
+  create->mutable_create();
+  auto result = table->ModifyColumnFamilies(request);
+  ASSERT_STATUS_OK(result);
+  ASSERT_TRUE(result->column_families().count("f"));
+
+  EXPECT_THAT(HasPersistentRow(table, "f", "row"),
+              StatusIs(StatusCode::kNotFound));
+}
+
+TEST_F(PersistentModifyColumnFamiliesTest,
+       DropAndRecreateLeavesEmptyFamilyAfterReopen) {
+  std::vector<std::string> initial_cfs = {"f"};
+  auto maybe_table = CreatePersistentTable(initial_cfs);
+  ASSERT_STATUS_OK(maybe_table);
+  auto table = maybe_table.value();
+  std::vector<SetCellParams> cells = {{"f", "c", 1000, "v"}};
+  ASSERT_STATUS_OK(SetCells(table, kTableName, "row", cells));
+
+  auto request = MakeModifyRequest();
+  auto* drop = request.add_modifications();
+  drop->set_id("f");
+  drop->set_drop(true);
+  auto* create = request.add_modifications();
+  create->set_id("f");
+  create->mutable_create();
+  ASSERT_STATUS_OK(table->ModifyColumnFamilies(request));
+  ASSERT_STATUS_OK(table->Close());
+  table.reset();
+
+  auto reopened = LoadTable(kTableName);
+  ASSERT_STATUS_OK(reopened);
+  EXPECT_EQ((*reopened)->Schema()->column_families().count("f"), 1);
+  EXPECT_THAT(HasPersistentRow(*reopened, "f", "row"),
+              StatusIs(StatusCode::kNotFound));
+  ASSERT_STATUS_OK((*reopened)->Close());
+}
+
+TEST_F(PersistentModifyColumnFamiliesTest,
+       CreateWithUnsupportedValueTypeKeepsTableAvailable) {
+  auto maybe_table = CreatePersistentTable({});
+  ASSERT_STATUS_OK(maybe_table);
+  auto table = maybe_table.value();
+
+  auto bad_request = MakeModifyRequest();
+  auto* bad = bad_request.add_modifications();
+  bad->set_id("bad");
+  bad->mutable_create()->mutable_value_type()->mutable_bytes_type();
+  EXPECT_THAT(table->ModifyColumnFamilies(bad_request),
+              StatusIs(StatusCode::kInvalidArgument));
+
+  auto request = MakeModifyRequest();
+  auto* create = request.add_modifications();
+  create->set_id("good");
+  create->mutable_create();
+  EXPECT_STATUS_OK(table->ModifyColumnFamilies(request));
+}
 
 TEST_F(PersistentModifyColumnFamiliesTest, CreateColumnFamily) {
   std::vector<std::string> initial_cfs = {};

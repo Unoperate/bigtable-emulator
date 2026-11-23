@@ -55,6 +55,9 @@ class Backend {
   /// Opens the tables found in storage. Called once, at startup.
   virtual StatusOr<std::vector<RestoredTable>> Restore() = 0;
 
+  /// UNAVAILABLE means the outcome is unknown until restart; the Registry
+  /// keeps the name blocked. Any other error means the table was not created;
+  /// its leftovers are removed at the next startup.
   virtual StatusOr<std::unique_ptr<TableOperations>> CreateTable(
       google::bigtable::admin::v2::Table const& schema) = 0;
 

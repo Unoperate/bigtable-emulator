@@ -25,6 +25,7 @@ bigtable_emulator_unit_tests = [
     "persistent/persistent_transaction_concurrency_test.cc",
     "range_set_test.cc",
     "recovery_test.cc",
+    "registry_test.cc",
     "server_test.cc",
     "table_test.cc",
 ]

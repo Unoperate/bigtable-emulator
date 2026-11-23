@@ -1,0 +1,40 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package google.cloud.bigtable.emulator;
+
+import "google/bigtable/admin/v2/table.proto";
+
+// Everything the persistent backend stores about a table, under one key in
+// the table's default column family.
+message TableMetadata {
+  google.bigtable.admin.v2.Table schema = 1;
+  State state = 2;
+  Intent intent = 3;
+}
+
+enum State {
+  STATE_UNSPECIFIED = 0;
+  STATE_CREATING = 1;
+  STATE_ACTIVE = 2;
+  STATE_DELETING = 3;
+}
+
+// Set between the two commits of a ModifyColumnFamilies that empties
+// families; replayed at startup if the second commit is missing.
+message Intent {
+  repeated string families_to_empty = 1;
+}

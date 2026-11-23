@@ -36,7 +36,7 @@ TEST(PersistentTransactionConcurrency, ConcurrentSetCellSameRow) {
   auto const* const column_qualifier = "col";
 
   std::vector<std::string> column_families = {column_family_name};
-  std::filesystem::remove_all("/tmp/persistent_transactions_projects");
+  std::filesystem::remove_all(TestDataDir());
   auto maybe_table = CreateTable(table_name, column_families, true);
   ASSERT_STATUS_OK(maybe_table);
   auto table = maybe_table.value();
@@ -88,7 +88,7 @@ TEST(PersistentTransactionConcurrency, ConcurrentSetCellSameRow) {
   ASSERT_STATUS_OK(HasPersistentCell(table, column_family_name, row_key,
                                      column_qualifier, 2000, "value_2"));
 
-  std::filesystem::remove_all("/tmp/persistent_transactions_projects");
+  std::filesystem::remove_all(TestDataDir());
 }
 
 TEST(PersistentTransactionConcurrency, ConcurrentSetAndDeleteSameRow) {
@@ -99,7 +99,7 @@ TEST(PersistentTransactionConcurrency, ConcurrentSetAndDeleteSameRow) {
   auto const* const column_qualifier = "col";
 
   std::vector<std::string> column_families = {column_family_name};
-  std::filesystem::remove_all("/tmp/persistent_transactions_projects");
+  std::filesystem::remove_all(TestDataDir());
   auto maybe_table = CreateTable(table_name, column_families, true);
   ASSERT_STATUS_OK(maybe_table);
   auto table = maybe_table.value();
@@ -157,7 +157,7 @@ TEST(PersistentTransactionConcurrency, ConcurrentSetAndDeleteSameRow) {
                                  column_qualifier, 3000, "value_3");
   ASSERT_TRUE(cell3.ok() || (!cell1.ok() && !cell2.ok() && !cell3.ok()));
 
-  std::filesystem::remove_all("/tmp/persistent_transactions_projects");
+  std::filesystem::remove_all(TestDataDir());
 }
 
 TEST(PersistentTransactionConcurrency, ConcurrentIndependentColumns) {
@@ -169,7 +169,7 @@ TEST(PersistentTransactionConcurrency, ConcurrentIndependentColumns) {
   auto const* const column_qualifier_b = "col_b";
 
   std::vector<std::string> column_families = {column_family_name};
-  std::filesystem::remove_all("/tmp/persistent_transactions_projects");
+  std::filesystem::remove_all(TestDataDir());
   auto maybe_table = CreateTable(table_name, column_families, true);
   ASSERT_STATUS_OK(maybe_table);
   auto table = maybe_table.value();
@@ -221,7 +221,7 @@ TEST(PersistentTransactionConcurrency, ConcurrentIndependentColumns) {
   ASSERT_STATUS_OK(HasPersistentCell(table, column_family_name, row_key,
                                      column_qualifier_b, 1000, "value_b"));
 
-  std::filesystem::remove_all("/tmp/persistent_transactions_projects");
+  std::filesystem::remove_all(TestDataDir());
 }
 
 }  // namespace emulator

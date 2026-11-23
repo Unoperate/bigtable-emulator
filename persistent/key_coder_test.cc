@@ -18,15 +18,23 @@ namespace emulator {
 namespace {
 
 using ::google::cloud::testing_util::StatusIs;
+using ::testing::HasSubstr;
 using ::std::string_literals::operator""s;
 
-std::string const kTrickyStrings[] = {""s,       "\0"s,    "\0\0"s,  "\0\x01"s,
-                                      "\0\xFF"s, "\x01"s,  "\xFF"s,  "a"s,
-                                      "a\0"s,    "a\x01"s, "a\xFF"s, "a!"s,
-                                      "ab"s,     "row1"s,  "row10"s, "row2"s};
+std::string const kTrickyStrings[] = {
+    ""s,     "\0"s,   "\0\0"s,  "\0\x01"s, "\0\xFF"s, "\x01"s,
+    "\xFF"s, "a"s,    "a\0"s,   "a\x01"s,  "a\xFF"s,  "a!"s,
+    "ab"s,   "row1"s, "row10"s, "row2"s,
+};
 
-constexpr uint64_t kTrickyTimestamps[] = {0, 1, 1000,
-                                          std::numeric_limits<uint64_t>::max()};
+constexpr uint64_t kTrickyTimestamps[] = {
+    0,
+    1,
+    1000,
+    // Inverted, it starts with the separator 00 01.
+    0xFFFE000000000000,
+    std::numeric_limits<uint64_t>::max(),
+};
 
 struct KeyParts {
   std::string row;
@@ -40,6 +48,7 @@ struct KeyParts {
     if (col != other.col) {
       return col < other.col;
     }
+    // Inverted to match Bigtable cell ordering semantics (freshest cell first).
     return ts > other.ts;
   }
 };
@@ -67,7 +76,8 @@ StringRangeSet::Range RangeStartingAfter(std::string start) {
 }
 
 std::string ColumnKeyWithTimestampBytes(std::size_t n) {
-  return KeyCoder::ColumnPrefix("row", "col") + std::string(n, '\x42');
+  return KeyCoder::EscapedRowColWithSeparator("row", "col") +
+         std::string(n, '\x42');
 }
 
 TEST(KeyCoderTest, EncodeBytes) {
@@ -80,15 +90,16 @@ TEST(KeyCoderTest, EncodeBytes) {
             "\0\x01\0\x01"s + std::string(8, '\0'));
 }
 
-TEST(KeyCoderTest, RowPrefixBytes) {
-  EXPECT_EQ(KeyCoder::RowPrefix(""), "\0\x01"s);
-  EXPECT_EQ(KeyCoder::RowPrefix("a"), "a\0\x01"s);
-  EXPECT_EQ(KeyCoder::RowPrefix("\0"s), "\0\xFF\0\x01"s);
+TEST(KeyCoderTest, EscapedRowWithSeparatorBytes) {
+  EXPECT_EQ(KeyCoder::EscapedRowWithSeparator(""), "\0\x01"s);
+  EXPECT_EQ(KeyCoder::EscapedRowWithSeparator("a"), "a\0\x01"s);
+  EXPECT_EQ(KeyCoder::EscapedRowWithSeparator("\0"s), "\0\xFF\0\x01"s);
 }
 
-TEST(KeyCoderTest, ColumnPrefixBytes) {
-  EXPECT_EQ(KeyCoder::ColumnPrefix("a", "b"), "a\0\x01"s + "b\0\x01"s);
-  EXPECT_EQ(KeyCoder::ColumnPrefix("a", ""), "a\0\x01\0\x01"s);
+TEST(KeyCoderTest, EscapedRowColWithSeparatorBytes) {
+  EXPECT_EQ(KeyCoder::EscapedRowColWithSeparator("a", "b"),
+            "a\0\x01"s + "b\0\x01"s);
+  EXPECT_EQ(KeyCoder::EscapedRowColWithSeparator("a", ""), "a\0\x01\0\x01"s);
 }
 
 TEST(KeyCoderTest, NextRowBytes) {
@@ -100,8 +111,9 @@ TEST(KeyCoderTest, NextColumnBytes) {
 }
 
 TEST(KeyCoderTest, RowRangeStartKeyBytes) {
-  EXPECT_EQ(KeyCoder::RowRangeStartKey(RangeStartingAt("a")), "a"s);
-  EXPECT_EQ(KeyCoder::RowRangeStartKey(RangeStartingAt("a\0"s)), "a\0\xFF"s);
+  EXPECT_EQ(KeyCoder::RowRangeStartKey(RangeStartingAt("a")), "a\0\x01"s);
+  EXPECT_EQ(KeyCoder::RowRangeStartKey(RangeStartingAt("a\0"s)),
+            "a\0\xFF\0\x01"s);
   EXPECT_EQ(KeyCoder::RowRangeStartKey(RangeStartingAfter("a")), "a\0\x02"s);
 }
 
@@ -140,10 +152,10 @@ TEST(KeyCoderTest, OrderMatchesTupleOrder) {
   }
 }
 
-TEST(KeyCoderTest, RowPrefixMatchesOnlyItsRow) {
+TEST(KeyCoderTest, EscapedRowWithSeparatorMatchesOnlyItsRow) {
   auto const key_parts = AllKeyParts();
   for (auto const& row : kTrickyStrings) {
-    auto const prefix = KeyCoder::RowPrefix(row);
+    auto const prefix = KeyCoder::EscapedRowWithSeparator(row);
     for (auto const& parts : key_parts) {
       auto const key = KeyCoder::Encode(parts.row, parts.col, parts.ts);
       if (parts.row == row) {
@@ -174,11 +186,11 @@ TEST(KeyCoderTest, EscapedRowMatchesRowsWithPrefix) {
   }
 }
 
-TEST(KeyCoderTest, ColumnPrefixMatchesOnlyItsColumn) {
+TEST(KeyCoderTest, EscapedRowColWithSeparatorMatchesOnlyItsColumn) {
   auto const key_parts = AllKeyParts();
   for (auto const& row : kTrickyStrings) {
     for (auto const& col : kTrickyStrings) {
-      auto const prefix = KeyCoder::ColumnPrefix(row, col);
+      auto const prefix = KeyCoder::EscapedRowColWithSeparator(row, col);
       for (auto const& parts : key_parts) {
         auto const key = KeyCoder::Encode(parts.row, parts.col, parts.ts);
         if (parts.row == row && parts.col == col) {
@@ -203,7 +215,7 @@ TEST(KeyCoderTest, NextRowBoundsRow) {
         EXPECT_LT(key, bound)
             << absl::CHexEscape(bound) << " vs " << absl::CHexEscape(key);
       } else {
-        EXPECT_LE(bound, key)
+        EXPECT_LT(bound, key)
             << absl::CHexEscape(bound) << " vs " << absl::CHexEscape(key);
       }
     }
@@ -221,7 +233,7 @@ TEST(KeyCoderTest, NextColumnBoundsColumn) {
           EXPECT_LT(key, bound)
               << absl::CHexEscape(bound) << " vs " << absl::CHexEscape(key);
         } else {
-          EXPECT_LE(bound, key)
+          EXPECT_LT(bound, key)
               << absl::CHexEscape(bound) << " vs " << absl::CHexEscape(key);
         }
       }
@@ -239,7 +251,7 @@ TEST(KeyCoderTest, RowRangeStartKeyBoundsClosedRange) {
         EXPECT_LT(key, bound)
             << absl::CHexEscape(bound) << " vs " << absl::CHexEscape(key);
       } else {
-        EXPECT_LE(bound, key)
+        EXPECT_LT(bound, key)
             << absl::CHexEscape(bound) << " vs " << absl::CHexEscape(key);
       }
     }
@@ -256,7 +268,7 @@ TEST(KeyCoderTest, RowRangeStartKeyBoundsOpenRange) {
         EXPECT_LT(key, bound)
             << absl::CHexEscape(bound) << " vs " << absl::CHexEscape(key);
       } else {
-        EXPECT_LE(bound, key)
+        EXPECT_LT(bound, key)
             << absl::CHexEscape(bound) << " vs " << absl::CHexEscape(key);
       }
     }
@@ -275,7 +287,7 @@ TEST(KeyCoderTest, ColumnRangeStartKeyBoundsClosedRange) {
           EXPECT_LT(key, bound)
               << absl::CHexEscape(bound) << " vs " << absl::CHexEscape(key);
         } else {
-          EXPECT_LE(bound, key)
+          EXPECT_LT(bound, key)
               << absl::CHexEscape(bound) << " vs " << absl::CHexEscape(key);
         }
       }
@@ -295,7 +307,7 @@ TEST(KeyCoderTest, ColumnRangeStartKeyBoundsOpenRange) {
           EXPECT_LT(key, bound)
               << absl::CHexEscape(bound) << " vs " << absl::CHexEscape(key);
         } else {
-          EXPECT_LE(bound, key)
+          EXPECT_LT(bound, key)
               << absl::CHexEscape(bound) << " vs " << absl::CHexEscape(key);
         }
       }
@@ -311,14 +323,10 @@ TEST(KeyCoderTest, DecodeRejectsMissingTerminator) {
   EXPECT_THAT(KeyCoder::Decode("row"), StatusIs(StatusCode::kInternal));
 }
 
-TEST(KeyCoderTest, DecodeRejectsTrailingSeparator) {
-  EXPECT_THAT(KeyCoder::Decode("row\0"s), StatusIs(StatusCode::kInternal));
-}
-
 TEST(KeyCoderTest, DecodeRejectsInvalidEscape) {
   EXPECT_THAT(
-      KeyCoder::Decode("a\0\x02"s + "col\0\x01"s + std::string(8, '\0')),
-      StatusIs(StatusCode::kInternal));
+      KeyCoder::Decode("a\0\x02\0\x01"s + "col\0\x01"s + std::string(8, '\0')),
+      StatusIs(StatusCode::kInternal, HasSubstr("invalid escape")));
 }
 
 TEST(KeyCoderTest, DecodeRejectsMissingColumn) {

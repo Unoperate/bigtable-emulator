@@ -17,11 +17,16 @@ namespace emulator {
 namespace {
 using ::std::string_view_literals::operator""sv;
 
-uint64_t InvertTimestamp(uint64_t timestamp) { return ~timestamp; }
 constexpr std::string_view kZero = "\x00"sv;
 constexpr std::string_view kEscapedZero = "\x00\xFF"sv;
 constexpr std::string_view kSeparator = "\x00\x01"sv;
 constexpr std::string_view kAfterSeparator = "\x00\x02"sv;
+
+uint64_t InvertTimestamp(uint64_t timestamp) { return ~timestamp; }
+
+std::string Escape(std::string_view to_be_escaped) {
+  return absl::StrReplaceAll(to_be_escaped, {{kZero, kEscapedZero}});
+}
 
 StatusOr<std::string> Unescape(std::string_view field,
                                std::string_view full_key) {
@@ -37,45 +42,40 @@ StatusOr<std::string> Unescape(std::string_view field,
 
 std::string KeyCoder::RowRangeStartKey(StringRangeSet::Range const& range) {
   return range.start_open() ? NextRow(range.start_finite())
-                            : EscapedRow(range.start_finite());
+                            : EscapedRowWithSeparator(range.start_finite());
 }
 
 std::string KeyCoder::ColumnRangeStartKey(std::string_view row,
                                           StringRangeSet::Range const& range) {
-  return range.start_open() ? NextColumn(row, range.start_finite())
-                            : ColumnPrefix(row, range.start_finite());
+  return range.start_open()
+             ? NextColumn(row, range.start_finite())
+             : EscapedRowColWithSeparator(row, range.start_finite());
 }
 
 std::string KeyCoder::Encode(std::string_view row, std::string_view col,
                              uint64_t timestamp) {
-  return ColumnPrefix(row, col) +
+  return EscapedRowColWithSeparator(row, col) +
          google::cloud::internal::EncodeBigEndian(InvertTimestamp(timestamp));
 }
 
-std::string KeyCoder::ColumnPrefix(std::string_view row, std::string_view col) {
-  std::string buffer = RowPrefix(row);
-  buffer += absl::StrReplaceAll(col, {{kZero, kEscapedZero}});
-  buffer.append(kSeparator);
-  return buffer;
+std::string KeyCoder::EscapedRowColWithSeparator(std::string_view row,
+                                                 std::string_view col) {
+  return absl::StrCat(Escape(row), kSeparator, Escape(col), kSeparator);
 }
 
 std::string KeyCoder::NextRow(std::string_view row) {
-  return absl::StrCat(EscapedRow(row), kAfterSeparator);
+  return absl::StrCat(Escape(row), kAfterSeparator);
 }
 
 std::string KeyCoder::NextColumn(std::string_view row, std::string_view col) {
-  return absl::StrCat(RowPrefix(row), EscapedRow(col), kAfterSeparator);
+  return absl::StrCat(Escape(row), kSeparator, Escape(col), kAfterSeparator);
 }
 
-std::string KeyCoder::RowPrefix(std::string_view row) {
-  std::string buffer = absl::StrReplaceAll(row, {{kZero, kEscapedZero}});
-  buffer.append(kSeparator);
-  return buffer;
+std::string KeyCoder::EscapedRowWithSeparator(std::string_view row) {
+  return absl::StrCat(Escape(row), kSeparator);
 }
 
-std::string KeyCoder::EscapedRow(std::string_view prefix) {
-  return absl::StrReplaceAll(prefix, {{kZero, kEscapedZero}});
-}
+std::string KeyCoder::EscapedRow(std::string_view row) { return Escape(row); }
 
 StatusOr<DecodeResult> KeyCoder::Decode(std::string_view full_key) {
   std::vector<std::string_view> fields =

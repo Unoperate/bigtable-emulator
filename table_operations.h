@@ -198,8 +198,14 @@ class TableOperationsBase : public TableOperations {
   std::map<std::string, std::shared_ptr<CF>> column_families_;
 };
 
-/// Validates `request` against `schema` and returns the new schema. Does not
-/// check the value types of new families.
+/// Fails unless `column_family_id` is 1-64 characters matching
+/// `[_a-zA-Z0-9][-_.a-zA-Z0-9]*`.
+Status ValidateColumnFamilyId(std::string const& column_family_id);
+
+/// Checks the family limit and every family's ID and value type.
+Status ValidateSchema(google::bigtable::admin::v2::Table const& schema);
+
+/// Validates `request` against `schema` and returns the new schema.
 StatusOr<google::bigtable::admin::v2::Table>
 ApplyModifyColumnFamiliesToSchemaOnly(
     google::bigtable::admin::v2::ModifyColumnFamiliesRequest const& request,

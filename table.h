@@ -27,6 +27,7 @@
 #include <google/protobuf/field_mask.pb.h>
 #include <grpcpp/server_context.h>
 #include <grpcpp/support/sync_stream.h>
+#include <atomic>
 #include <memory>
 #include <string>
 
@@ -50,7 +51,11 @@ class Table {
   std::string const& name() const { return name_; }
 
   /// Takes no table lock.
-  std::shared_ptr<google::bigtable::admin::v2::Table const> schema() const;
+  std::shared_ptr<google::bigtable::admin::v2::Table const> Schema() const;
+
+  Status CheckAvailable() const;
+  /// Until restart.
+  void MarkUnavailable();
 
   Status Update(google::bigtable::admin::v2::Table const& new_schema,
                 google::protobuf::FieldMask const& to_update);
@@ -108,12 +113,10 @@ class Table {
 
   /// NOT_FOUND after Delete() or Close(); UNAVAILABLE once the table is
   /// unavailable. Call with `mu_` held.
-  StatusOr<DataOperations*> data_operations() const;
-  StatusOr<AdminOperations*> admin_operations();
+  StatusOr<emulator::DataOperations*> DataOperations() const;
+  StatusOr<emulator::AdminOperations*> AdminOperations();
 
   void PublishSchema(google::bigtable::admin::v2::Table new_schema);
-  /// Until restart.
-  void MarkUnavailable(Status reason);
 
   Status DoMutationsWithPossibleRollback(
       std::string const& row_key,
@@ -129,9 +132,9 @@ class Table {
   mutable absl::Mutex mu_;
   /// Null after Delete() or Close().
   std::unique_ptr<TableOperations> operations_;
-  /// Not OK once the table is unavailable.
-  Status unavailable_;
+  std::atomic<bool> unavailable_{false};
 
+  /// Access only via std::atomic_load and std::atomic_store.
   std::shared_ptr<google::bigtable::admin::v2::Table const> schema_;
 };
 

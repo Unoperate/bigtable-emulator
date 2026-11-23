@@ -95,7 +95,7 @@ StatusOr<bool> HasPersistentRowBool(
   auto const& cf = std::static_pointer_cast<PersistentColumnFamily>(
       column_family_it->second);
   auto iter = utilities->GetIterator(cf);
-  std::string const row_prefix = KeyCoder::RowPrefix(row_key);
+  std::string const row_prefix = KeyCoder::EscapedRowWithSeparator(row_key);
   iter->Seek(row_prefix);
   return iter->Valid() && iter->key().starts_with(row_prefix);
 }
@@ -117,8 +117,8 @@ std::string BackendName(::testing::TestParamInfo<bool> const& info) {
 /// one.
 class DropRowRange : public ::testing::TestWithParam<bool> {
  protected:
-  void SetUp() override { std::filesystem::remove_all("/tmp/drw_projects"); }
-  void TearDown() override { std::filesystem::remove_all("/tmp/drw_projects"); }
+  void SetUp() override { std::filesystem::remove_all(TestDataDir()); }
+  void TearDown() override { std::filesystem::remove_all(TestDataDir()); }
 };
 
 INSTANTIATE_TEST_SUITE_P(Backends, DropRowRange, ::testing::Bool(),

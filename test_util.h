@@ -47,14 +47,17 @@ StatusOr<std::shared_ptr<Table>> CreateTable(
     std::string const& table_name, std::vector<std::string>& column_families,
     bool should_persist);
 
-/// Creates a table outside of a Registry, in memory or under `data_root`.
-StatusOr<std::shared_ptr<Table>> CreateTable(
-    ::google::bigtable::admin::v2::Table schema, bool should_persist,
-    std::string const& data_root = "/tmp/");
+/// A data directory of the running test's own, under Bazel's TEST_TMPDIR, so
+/// that tests and parallel test runs never share databases. Crashes outside of
+/// a running test.
+std::string TestDataDir();
 
-/// Opens a persistent table created earlier under `data_root`.
-StatusOr<std::shared_ptr<Table>> LoadTable(
-    std::string const& table_name, std::string const& data_root = "/tmp/");
+/// Creates a table outside of a Registry, in memory or under `TestDataDir()`.
+StatusOr<std::shared_ptr<Table>> CreateTable(
+    ::google::bigtable::admin::v2::Table schema, bool should_persist);
+
+/// Opens a persistent table created earlier under `TestDataDir()`.
+StatusOr<std::shared_ptr<Table>> LoadTable(std::string const& table_name);
 
 ::google::bigtable::admin::v2::Table CreateSchema(
     std::string const& table_name,

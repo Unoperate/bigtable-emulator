@@ -34,6 +34,10 @@ namespace cloud {
 namespace bigtable {
 namespace emulator {
 
+/// The RocksDB column family storing the Bigtable family `column_family_name`.
+/// The prefix keeps a family named "default" away from RocksDB's own.
+std::string RocksDbColumnFamilyName(std::string const& column_family_name);
+
 /**
  * Convenience wrapper around ColumnFamilyHandle
  */
@@ -73,7 +77,8 @@ class PersistentColumnFamily : public ColumnFamily {
   static StatusOr<std::shared_ptr<PersistentColumnFamily>>
   ConstructAggregateColumnFamily(
       google::bigtable::admin::v2::Type const& value_type,
-      std::shared_ptr<rocksdb::TransactionDB> db_, std::string const& name);
+      std::shared_ptr<rocksdb::TransactionDB> db_,
+      rocksdb::ColumnFamilyOptions const& opts, std::string const& name);
 
  private:
   // Owning  table
@@ -108,7 +113,7 @@ class FilteredPersistentColumnFamilyStream : public FilteredColumnFamilyStream {
                    StringRangeSet::Range::StartLess>::const_iterator
       col_filter_pos_;
   mutable std::set<TimestampRangeSet::Range,
-                   TimestampRangeSet::Range::StartLess>::reverse_iterator
+                   TimestampRangeSet::Range::StartLess>::const_reverse_iterator
       ts_filter_pos_;
   mutable absl::optional<std::string> current_row_key_tracker_;
   mutable absl::optional<std::string> current_col_key_tracker_;

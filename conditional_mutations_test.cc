@@ -28,12 +28,8 @@ std::string BackendName(::testing::TestParamInfo<bool> const& info) {
 /// one.
 class ConditionalMutations : public ::testing::TestWithParam<bool> {
  protected:
-  void SetUp() override {
-    std::filesystem::remove_all("/tmp/conditional_projects");
-  }
-  void TearDown() override {
-    std::filesystem::remove_all("/tmp/conditional_projects");
-  }
+  void SetUp() override { std::filesystem::remove_all(TestDataDir()); }
+  void TearDown() override { std::filesystem::remove_all(TestDataDir()); }
 };
 
 INSTANTIATE_TEST_SUITE_P(Backends, ConditionalMutations, ::testing::Bool(),

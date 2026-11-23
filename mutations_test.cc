@@ -180,7 +180,8 @@ Status HasPersistentColumn(
   auto const& cf = std::static_pointer_cast<PersistentColumnFamily>(
       column_family_it->second);
 
-  auto const column_prefix = KeyCoder::ColumnPrefix(row_key, column_qualifier);
+  auto const column_prefix =
+      KeyCoder::EscapedRowColWithSeparator(row_key, column_qualifier);
   auto iter = utilities->GetIterator(cf);
   iter->Seek(column_prefix);
 
@@ -249,7 +250,8 @@ StatusOr<std::map<std::chrono::microseconds, std::string>> GetPersistentColumn(
   auto const& cf = std::static_pointer_cast<PersistentColumnFamily>(
       column_family_it->second);
 
-  auto const column_prefix = KeyCoder::ColumnPrefix(row_key, column_qualifier);
+  auto const column_prefix =
+      KeyCoder::EscapedRowColWithSeparator(row_key, column_qualifier);
   auto iter = utilities->GetIterator(cf);
   iter->Seek(column_prefix);
 
@@ -381,12 +383,8 @@ std::string BackendName(::testing::TestParamInfo<bool> const& info) {
 /// one.
 class MutationsTest : public ::testing::TestWithParam<bool> {
  protected:
-  void SetUp() override {
-    std::filesystem::remove_all("/tmp/mutation_projects");
-  }
-  void TearDown() override {
-    std::filesystem::remove_all("/tmp/mutation_projects");
-  }
+  void SetUp() override { std::filesystem::remove_all(TestDataDir()); }
+  void TearDown() override { std::filesystem::remove_all(TestDataDir()); }
 };
 
 class TransactionRollback : public MutationsTest {};
@@ -1747,7 +1745,7 @@ TEST(PersistentMutationTimestamp, KeysAndStreamsUseMicroseconds) {
   auto const* const column_qualifier = "test";
 
   std::vector<std::string> column_families = {column_family_name};
-  std::filesystem::remove_all("/tmp/mutation_projects");
+  std::filesystem::remove_all(TestDataDir());
   auto maybe_table = CreateTable(table_name, column_families, true);
   ASSERT_STATUS_OK(maybe_table);
   auto table = maybe_table.value();
@@ -1768,7 +1766,7 @@ TEST(PersistentMutationTimestamp, KeysAndStreamsUseMicroseconds) {
   ASSERT_STATUS_OK(stream);
   ASSERT_TRUE(stream->HasValue());
   EXPECT_EQ(std::chrono::microseconds(1000), (*stream)->timestamp());
-  std::filesystem::remove_all("/tmp/mutation_projects");
+  std::filesystem::remove_all(TestDataDir());
 }
 
 }  // namespace emulator

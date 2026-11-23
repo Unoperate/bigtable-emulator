@@ -112,14 +112,13 @@ class DataLock {
 Table::Table(std::string name, btadmin::Table schema,
              std::unique_ptr<TableOperations> operations)
     : name_(std::move(name)),
-      concurrent_data_operations_(operations->AllowsConcurrentDataOperations()),
+      concurrent_data_operations_(operations &&
+                                  operations->AllowsConcurrentDataOperations()),
       operations_(std::move(operations)),
       schema_(std::make_shared<btadmin::Table const>(std::move(schema))) {}
 
-std::shared_ptr<btadmin::Table const> Table::schema() const {
-  // TODO(prawilny): this read races with PublishSchema(); make the pointer
-  // swap atomic.
-  return schema_;
+std::shared_ptr<btadmin::Table const> Table::Schema() const {
+  return std::atomic_load(&schema_);
 }
 
 Status Table::Close() {
@@ -134,17 +133,16 @@ Status Table::Close() {
 
 // TODO(prawilny): add helpers that take the lock, get the operations and mark
 // the table unavailable, to remove the repeated status checks below.
-StatusOr<DataOperations*> Table::data_operations() const {
+StatusOr<DataOperations*> Table::DataOperations() const {
   if (!operations_) {
     return NotFoundError("No such table",
                          GCP_ERROR_INFO().WithMetadata("table_name", name_));
   }
-  if (!unavailable_.ok()) {
-    return UnavailableError(
-        "The table is unavailable: " + unavailable_.message(),
-        GCP_ERROR_INFO().WithMetadata("table_name", name_));
+  auto status = CheckAvailable();
+  if (!status.ok()) {
+    return status;
   }
-  auto status = operations_->BackgroundError();
+  status = operations_->BackgroundError();
   if (!status.ok()) {
     return UnavailableError("The table is unavailable: " + status.message(),
                             GCP_ERROR_INFO().WithMetadata("table_name", name_));
@@ -152,8 +150,8 @@ StatusOr<DataOperations*> Table::data_operations() const {
   return operations_.get();
 }
 
-StatusOr<AdminOperations*> Table::admin_operations() {
-  auto maybe_operations = data_operations();
+StatusOr<AdminOperations*> Table::AdminOperations() {
+  auto maybe_operations = DataOperations();
   if (!maybe_operations) {
     return maybe_operations.status();
   }
@@ -161,10 +159,21 @@ StatusOr<AdminOperations*> Table::admin_operations() {
 }
 
 void Table::PublishSchema(btadmin::Table new_schema) {
-  schema_ = std::make_shared<btadmin::Table const>(std::move(new_schema));
+  std::atomic_store(
+      &schema_, std::make_shared<btadmin::Table const>(std::move(new_schema)));
 }
 
-void Table::MarkUnavailable(Status reason) { unavailable_ = std::move(reason); }
+void Table::MarkUnavailable() { unavailable_.store(true); }
+
+Status Table::CheckAvailable() const {
+  if (unavailable_.load()) {
+    return UnavailableError(
+        "The table is unavailable after a failed admin operation; restart "
+        "the emulator.",
+        GCP_ERROR_INFO().WithMetadata("table_name", name_));
+  }
+  return Status();
+}
 
 Status PrepareTableSchema(btadmin::Table& schema) {
   if (schema.granularity() ==
@@ -196,22 +205,22 @@ Status PrepareTableSchema(btadmin::Table& schema) {
         "`automated_backup_policy` not empty.",
         GCP_ERROR_INFO().WithMetadata("schema", schema.DebugString()));
   }
-  return Status();
+  return ValidateSchema(schema);
 }
 
 Status Table::SampleRowKeys(
     grpc::ServerWriter<google::bigtable::v2::SampleRowKeysResponse>* writer)
     const {
   /**
-   * For Persistent Table, CreateCellStream will create new RocksDB Iterator.
-   * However, each iterator can work on a different version of data,
-   * so for simplicity let's just acquire the exclusive lock (on the
-   * assumption that SampleRowKeys won't be invoked often).
+   * For Persistent Table, SampleRowKeys creates several streams, each
+   * with its own snapshot, so they can see different versions of data. For
+   * simplicity let's just acquire the exclusive lock (on the assumption that
+   * SampleRowKeys won't be invoked often).
    */
   // TODO(prawilny): fix this.
   absl::WriterMutexLock lock(&mu_);
 
-  auto maybe_operations = data_operations();
+  auto maybe_operations = DataOperations();
   if (!maybe_operations) {
     return maybe_operations.status();
   }
@@ -241,15 +250,15 @@ StatusOr<btadmin::Table> Table::ModifyColumnFamilies(
     btadmin::ModifyColumnFamiliesRequest const& request) {
   absl::WriterMutexLock lock(&mu_);
 
-  auto maybe_operations = admin_operations();
+  auto maybe_operations = AdminOperations();
   if (!maybe_operations) {
     return maybe_operations.status();
   }
   auto maybe_new_schema =
-      (*maybe_operations)->ModifyColumnFamilies(request, *schema_);
+      (*maybe_operations)->ModifyColumnFamilies(request, *Schema());
   if (!maybe_new_schema) {
     if (maybe_new_schema.status().code() == StatusCode::kUnavailable) {
-      MarkUnavailable(maybe_new_schema.status());
+      MarkUnavailable();
     }
     return maybe_new_schema.status();
   }
@@ -284,17 +293,17 @@ Status Table::Update(google::bigtable::admin::v2::Table const& new_schema,
   }
 
   absl::WriterMutexLock lock(&mu_);
-  auto maybe_operations = admin_operations();
+  auto maybe_operations = AdminOperations();
   if (!maybe_operations) {
     return maybe_operations.status();
   }
-  auto updated_schema = *schema_;
+  auto updated_schema = *Schema();
   FieldMaskUtil::MergeMessageTo(new_schema, to_update,
                                 FieldMaskUtil::MergeOptions(), &updated_schema);
   auto s = (*maybe_operations)->UpdateTable(updated_schema);
   if (!s.ok()) {
     if (s.code() == StatusCode::kUnavailable) {
-      MarkUnavailable(s);
+      MarkUnavailable();
     }
     return s;
   }
@@ -466,7 +475,7 @@ Status Table::DoMutationsWithPossibleRollback(
                                       absl::StrFormat("%zu", row_key.size())));
   }
 
-  auto maybe_operations = data_operations();
+  auto maybe_operations = DataOperations();
   if (!maybe_operations) {
     return maybe_operations.status();
   }
@@ -520,7 +529,7 @@ Table::CheckAndMutateRow(
                                       request.DebugString()));
   }
 
-  auto maybe_operations = data_operations();
+  auto maybe_operations = DataOperations();
   if (!maybe_operations) {
     return maybe_operations.status();
   }
@@ -577,7 +586,7 @@ Status Table::ReadRows(google::bigtable::v2::ReadRowsRequest const& request,
     row_set = std::make_shared<StringRangeSet>(StringRangeSet::All());
   }
   DataLock lock(mu_, concurrent_data_operations_);
-  auto maybe_operations = data_operations();
+  auto maybe_operations = DataOperations();
   if (!maybe_operations) {
     return maybe_operations.status();
   }
@@ -623,11 +632,11 @@ Status Table::ReadRows(google::bigtable::v2::ReadRowsRequest const& request,
 
 StatusOr<std::unique_ptr<TableOperations>> Table::Delete() {
   absl::WriterMutexLock lock(&mu_);
-  if (!operations_) {
-    return NotFoundError("No such table",
-                         GCP_ERROR_INFO().WithMetadata("table_name", name_));
+  auto maybe_operations = AdminOperations();
+  if (!maybe_operations) {
+    return maybe_operations.status();
   }
-  if (schema_->deletion_protection()) {
+  if (Schema()->deletion_protection()) {
     return FailedPreconditionError(
         "The table has deletion protection.",
         GCP_ERROR_INFO().WithMetadata("table_name", name_));
@@ -635,7 +644,7 @@ StatusOr<std::unique_ptr<TableOperations>> Table::Delete() {
   auto status = operations_->CommitDeletion();
   if (!status.ok()) {
     if (status.code() == StatusCode::kUnavailable) {
-      MarkUnavailable(status);
+      MarkUnavailable();
     }
     return status;
   }
@@ -645,7 +654,7 @@ StatusOr<std::unique_ptr<TableOperations>> Table::Delete() {
 Status Table::DropRowRange(
     ::google::bigtable::admin::v2::DropRowRangeRequest const& request) {
   absl::WriterMutexLock lock(&mu_);
-  auto maybe_operations = admin_operations();
+  auto maybe_operations = AdminOperations();
   if (!maybe_operations) {
     return maybe_operations.status();
   }
@@ -662,7 +671,7 @@ Status Table::DropRowRange(
     Status status = (*maybe_operations)->RemoveAllDataFromColumnFamilies();
     if (!status.ok()) {
       if (status.code() == StatusCode::kUnavailable) {
-        MarkUnavailable(status);
+        MarkUnavailable();
       }
       return status;
     }
@@ -687,7 +696,7 @@ Status Table::DropRowRange(
   Status status = (*maybe_operations)->DropRowRange(row_key_prefix);
   if (!status.ok()) {
     if (status.code() == StatusCode::kUnavailable) {
-      MarkUnavailable(status);
+      MarkUnavailable();
     }
     return status;
   }
@@ -707,7 +716,7 @@ Table::ReadModifyWriteRow(
 
   DataLock lock(mu_, concurrent_data_operations_);
 
-  auto maybe_operations = data_operations();
+  auto maybe_operations = DataOperations();
   if (!maybe_operations) {
     return maybe_operations.status();
   }

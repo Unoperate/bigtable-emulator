@@ -10,6 +10,8 @@
 #include "table.h"
 #include <google/bigtable/admin/v2/table.pb.h>
 #include <google/bigtable/v2/bigtable.pb.h>
+#include <gtest/gtest.h>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -31,12 +33,17 @@ StatusOr<std::shared_ptr<Table>> CreateTable(
   return CreateTable(std::move(schema), should_persist);
 }
 
+std::string TestDataDir() {
+  auto const* info = ::testing::UnitTest::GetInstance()->current_test_info();
+  return std::filesystem::path(::testing::TempDir()) /
+         (std::string(info->test_suite_name()) + "_" + info->name());
+}
+
 StatusOr<std::shared_ptr<Table>> CreateTable(
-    ::google::bigtable::admin::v2::Table schema, bool should_persist,
-    std::string const& data_root) {
+    ::google::bigtable::admin::v2::Table schema, bool should_persist) {
   BackendOptions options;
   if (should_persist) {
-    options.data_dir = data_root;
+    options.data_dir = TestDataDir();
   }
   auto maybe_backend = Backend::Create(options);
   if (!maybe_backend) {
@@ -51,17 +58,26 @@ StatusOr<std::shared_ptr<Table>> CreateTable(
                                  *std::move(maybe_operations));
 }
 
-StatusOr<std::shared_ptr<Table>> LoadTable(std::string const& table_name,
-                                           std::string const& data_root) {
-  ::google::bigtable::admin::v2::Table schema;
-  schema.set_name(table_name);
-  auto maybe_operations =
-      PersistentTableOperations::OpenExisting(data_root, schema);
-  if (!maybe_operations) {
-    return maybe_operations.status();
+StatusOr<std::shared_ptr<Table>> LoadTable(std::string const& table_name) {
+  BackendOptions options;
+  options.data_dir = TestDataDir();
+  auto maybe_backend = PersistentBackend::Open(options);
+  if (!maybe_backend) {
+    return maybe_backend.status();
   }
-  return std::make_shared<Table>(table_name, std::move(schema),
-                                 *std::move(maybe_operations));
+  auto maybe_restored = (*maybe_backend)->Restore();
+  if (!maybe_restored) {
+    return maybe_restored.status();
+  }
+  for (auto& restored : *maybe_restored) {
+    if (restored.name == table_name) {
+      return std::make_shared<Table>(std::move(restored.name),
+                                     std::move(restored.schema),
+                                     std::move(restored.operations));
+    }
+  }
+  return NotFoundError("No such table",
+                       GCP_ERROR_INFO().WithMetadata("table_name", table_name));
 }
 
 Status SetCells(
@@ -231,7 +247,7 @@ Status HasPersistentRow(
   auto const& cf = std::static_pointer_cast<PersistentColumnFamily>(
       column_family_it->second);
   auto iter = utilities->GetIterator(cf);
-  std::string const row_prefix = KeyCoder::RowPrefix(row_key);
+  std::string const row_prefix = KeyCoder::EscapedRowWithSeparator(row_key);
   iter->Seek(row_prefix);
   if (!iter->Valid() || !iter->key().starts_with(row_prefix)) {
     return NotFoundError("row key not found in column family",

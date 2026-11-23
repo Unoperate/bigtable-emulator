@@ -154,45 +154,37 @@ TEST(FilteredTableStream, OtherFiltersArePropagated) {
   EXPECT_EQ("row1 fam1:col1 @10ms: foo\n", DumpStream(stream));
 }
 
-class PersistentCellStream : public ::testing::Test {
- protected:
-  static constexpr char const* kTableName =
+TEST(PersistentCellStream, CreateCellStreamIgnoresLaterWrites) {
+  auto constexpr kTableName =
       "snapshot_projects/test/instances/test/tables/test";
+  std::filesystem::remove_all(TestDataDir());
 
-  void SetUp() override {
-    std::filesystem::remove_all("/tmp/snapshot_projects");
+  std::vector<std::string> values;
+  {
     std::vector<std::string> column_families = {"fam1", "fam2"};
     auto maybe_table = CreateTable(kTableName, column_families, true);
     ASSERT_STATUS_OK(maybe_table);
-    table_ = maybe_table.value();
+    auto table = maybe_table.value();
 
     std::vector<SetCellParams> before = {
         {"fam1", "col", 1000, "old"},
         {"fam2", "col", 1000, "old"},
     };
-    ASSERT_STATUS_OK(SetCells(table_, kTableName, "row", before));
+    ASSERT_STATUS_OK(SetCells(table, kTableName, "row", before));
+
+    auto stream = table->GetUtilities()->CreateCellStream(
+        std::make_shared<StringRangeSet>(StringRangeSet::All()), absl::nullopt);
+    ASSERT_STATUS_OK(stream);
+
+    std::vector<SetCellParams> after = {{"fam2", "col", 2000, "new"}};
+    ASSERT_STATUS_OK(SetCells(table, kTableName, "row", after));
+
+    for (; stream->HasValue(); stream->Next()) {
+      values.push_back(stream->Value().value());
+    }
   }
+  std::filesystem::remove_all(TestDataDir());
 
-  void TearDown() override {
-    table_.reset();
-    std::filesystem::remove_all("/tmp/snapshot_projects");
-  }
-
-  std::shared_ptr<Table> table_;
-};
-
-TEST_F(PersistentCellStream, IgnoresWritesAfterCreation) {
-  auto stream = table_->GetUtilities()->CreateCellStream(
-      std::make_shared<StringRangeSet>(StringRangeSet::All()), absl::nullopt);
-  ASSERT_STATUS_OK(stream);
-
-  std::vector<SetCellParams> after = {{"fam2", "col", 2000, "new"}};
-  ASSERT_STATUS_OK(SetCells(table_, kTableName, "row", after));
-
-  std::vector<std::string> values;
-  for (; stream->HasValue(); stream->Next()) {
-    values.push_back(stream->Value().value());
-  }
   EXPECT_EQ((std::vector<std::string>{"old", "old"}), values);
 }
 

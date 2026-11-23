@@ -136,7 +136,8 @@ class Registry {
    * concurrency - every access to a table should start with creating a copy of
    * the shared pointer.
    *
-   * A null pointer reserves the name while CreateTable runs.
+   * A null pointer reserves the name while CreateTable runs, and until restart
+   * if CreateTable failed with an unknown outcome.
    */
   std::map<std::string, std::shared_ptr<Table>> table_by_name_;
   bool shutting_down_ = false;

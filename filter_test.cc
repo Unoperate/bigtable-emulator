@@ -1991,7 +1991,7 @@ TEST(PersistentFiltersEndToEnd, ColumnRange) {
   }
   ASSERT_EQ(expected, actual);
 
-  std::filesystem::remove_all("/tmp/projects");
+  std::filesystem::remove_all(TestDataDir());
 }
 
 }  // namespace emulator

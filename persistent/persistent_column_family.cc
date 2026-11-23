@@ -49,6 +49,10 @@ bool MatchesAll(std::string_view value,
 
 }  // namespace
 
+std::string RocksDbColumnFamilyName(std::string const& column_family_name) {
+  return "cf_" + column_family_name;
+}
+
 StatusOr<std::shared_ptr<PersistentColumnFamily>>
 PersistentColumnFamily::Create(std::shared_ptr<rocksdb::TransactionDB> db,
                                rocksdb::ColumnFamilyOptions const& opts,
@@ -57,7 +61,8 @@ PersistentColumnFamily::Create(std::shared_ptr<rocksdb::TransactionDB> db,
   pcf.db_ = std::move(db);
 
   rocksdb::ColumnFamilyHandle* raw = nullptr;
-  auto status = pcf.db_->CreateColumnFamily(opts, name, &raw);
+  auto status =
+      pcf.db_->CreateColumnFamily(opts, RocksDbColumnFamilyName(name), &raw);
   if (!status.ok()) {
     return InternalError("Failed to create Column Family: " + status.ToString(),
                          GCP_ERROR_INFO().WithMetadata("cf name", name));
@@ -106,6 +111,7 @@ bool FilteredPersistentColumnFamilyStream::HasValue() const {
 
 CellView const& FilteredPersistentColumnFamilyStream::Value() const {
   InitializeIfNeeded();
+  assert(curr_decoded_key_.has_value());
   auto const& curr_key = *curr_decoded_key_;
   if (!cur_value_) {
     cur_value_ = CellView(curr_key.row, column_family_name_, curr_key.col,
@@ -118,11 +124,7 @@ CellView const& FilteredPersistentColumnFamilyStream::Value() const {
 bool FilteredPersistentColumnFamilyStream::Next(NextMode mode) {
   InitializeIfNeeded();
   cur_value_.reset();
-
-  // API specifies that false is returned only for an unsupported op.
-  if (!curr_decoded_key_.has_value()) {
-    return true;
-  }
+  assert(curr_decoded_key_.has_value());
 
   auto const& curr_key_value = *curr_decoded_key_;
   if (mode == NextMode::kCell) {
@@ -262,8 +264,8 @@ void FilteredPersistentColumnFamilyStream::InitializeIfNeeded() const {
 StatusOr<std::shared_ptr<PersistentColumnFamily>>
 PersistentColumnFamily::ConstructAggregateColumnFamily(
     google::bigtable::admin::v2::Type const& value_type,
-    std::shared_ptr<rocksdb::TransactionDB> db_, std::string const& name) {
-  rocksdb::ColumnFamilyOptions opts;
+    std::shared_ptr<rocksdb::TransactionDB> db_,
+    rocksdb::ColumnFamilyOptions const& opts, std::string const& name) {
   auto maybe_cf = Create(std::move(db_), opts, name);
   if (!maybe_cf) {
     return InternalError(
@@ -333,7 +335,7 @@ bool PersistentColumnFamily::RowKeyExists(std::string const& row_key) {
   auto it = std::unique_ptr<rocksdb::Iterator>(
       db_->NewIterator(rocksdb::ReadOptions(), handle_.get()));
 
-  auto const row_prefix = KeyCoder::RowPrefix(row_key);
+  auto const row_prefix = KeyCoder::EscapedRowWithSeparator(row_key);
   it->Seek(row_prefix);
   return it->Valid() && it->key().starts_with(row_prefix);
 }

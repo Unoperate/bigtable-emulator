@@ -13,8 +13,9 @@
  * the persistent database. The general format of the key is row#col#timestamp,
  * where # is a separator, and the timestamp is 8 bytes: bitwise-inverted,
  * big-endian encoding of the timestamp, so that newer cells sort first.
- * For the separator "#" we use "\x00\x01", and we use "\xFF" to escape
- * "\x00" that are already present in the row or column.
+ * The separator "#" is "\x00\x01". A row or column is "escaped" by writing
+ * every "\x00" in it as "\x00\xFF", so an escaped field never contains the
+ * separator.
  * Because 0x01 is smaller than 0xFF and any other byte is greater
  * than 0x00, bytewise order of the encoded keys matches the order of
  * (row, col) tuples.
@@ -35,7 +36,7 @@ class KeyCoder {
   /**
    * @param row row key
    * @param col column key
-   * @param timestamp unix timestamp in milliseconds
+   * @param timestamp unix timestamp in microseconds
    * @return RocksDB key in the format described in the header.
    */
   static std::string Encode(std::string_view row, std::string_view col,
@@ -43,61 +44,64 @@ class KeyCoder {
 
   /**
    * @param row row key
-   * @return row key with "\x00" escaped as "\x00\xFF" and with the
-   * separator "\x00\x01" appended at the end.
+   * @return "escaped" row key with the separator added at the end.
    */
-  static std::string RowPrefix(std::string_view row);
+  static std::string EscapedRowWithSeparator(std::string_view row);
 
   /**
-   * @param prefix row key prefix
-   * @return row key prefix with "\x00" escaped as "\x00\xFF"
+   * @param row row key
+   * @return "escaped" row key, but without the separator at the end.
    */
-  static std::string EscapedRow(std::string_view prefix);
+  static std::string EscapedRow(std::string_view row);
 
   /**
    * @param row row key
    * @param col column key
-   * @return row key and column key with "\x00" escaped as "\x00\xFF" and
-   * with the separator "\x00\x01" between them and at the end of the column
-   * key.
+   * @return Concatenated "escaped" row key and column key with the separator
+   * added to the end of both of them.
    */
-  static std::string ColumnPrefix(std::string_view row, std::string_view col);
+  static std::string EscapedRowColWithSeparator(std::string_view row,
+                                                std::string_view col);
 
   /**
    * @param row row key
-   * @return returns a key bigger than all keys starting with the row prefix
-   * key. Can be used with rocksdb iterator seek to jump to the next row.
+   * @return a key that is greater than every key of the row and not greater
+   * than any key of a later row. Can be used with rocksdb iterator seek to jump
+   * to the next row.
    */
   static std::string NextRow(std::string_view row);
 
   /**
    * @param row row key
    * @param col column key
-   * @return returns a key bigger than all keys starting with the column prefix
-   * constructed from the row and col keys. Can be used with rocksdb iterator
-   * seek to jump to the next column.
+   * @return a key that is greater than every key of the column in the row and
+   * not greater than any key of a later column or row. Can be used with rocksdb
+   * iterator seek to jump to the next column.
    */
   static std::string NextColumn(std::string_view row, std::string_view col);
 
   /**
    * @param full_key RocksDB key in the format described in the header
-   * @return row key, column key and the unix timestamp in millis that were part
-   * of the input key.
+   * @return row key, column key and the unix timestamp in microseconds that
+   * were part of the input key.
    */
   static StatusOr<DecodeResult> Decode(std::string_view full_key);
 
   /**
-   * @param range string range set
-   * @return row range start encoded by KeyCoder, where the encoding depends on
-   * whether the range is closed or open
+   * @param range row range
+   * @return a key that is not greater than any key of a row in the range and
+   * greater than every key of a row before the range. Can be used with rocksdb
+   * iterator seek to jump to the first row of the range.
    */
   static std::string RowRangeStartKey(StringRangeSet::Range const& range);
 
   /**
    * @param row row key
-   * @param range string range set
-   * @return column range start encoded by KeyCoder, where the encoding depends
-   * on whether the range is closed or open
+   * @param range column range
+   * @return a key that is not greater than any key of the row with a column in
+   * the range and greater than every key of the row with a column before the
+   * range. Can be used with rocksdb iterator seek to jump to the first column
+   * of the range.
    */
   static std::string ColumnRangeStartKey(std::string_view row,
                                          StringRangeSet::Range const& range);

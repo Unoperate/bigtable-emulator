@@ -15,6 +15,7 @@
 #ifndef GOOGLE_CLOUD_CPP_GOOGLE_CLOUD_BIGTABLE_EMULATOR_PERSISTENT_PERSISTENT_BACKEND_H
 #define GOOGLE_CLOUD_CPP_GOOGLE_CLOUD_BIGTABLE_EMULATOR_PERSISTENT_PERSISTENT_BACKEND_H
 
+#include "google/cloud/internal/make_status.h"
 #include "google/cloud/status.h"
 #include "google/cloud/status_or.h"
 #include "absl/types/optional.h"
@@ -22,16 +23,24 @@
 #include "column_family.h"
 #include "filter.h"
 #include "persistent/persistent_column_family.h"
+#include "persistent/table_metadata.pb.h"
 #include "range_set.h"
+#include "rocksdb/cache.h"
+#include "rocksdb/options.h"
 #include "rocksdb/utilities/transaction.h"
 #include "rocksdb/utilities/transaction_db.h"
+#include "rocksdb/write_buffer_manager.h"
 #include "table_operations.h"
 #include <google/bigtable/admin/v2/bigtable_table_admin.pb.h>
 #include <google/bigtable/admin/v2/table.pb.h>
 #include <google/bigtable/v2/bigtable.pb.h>
 #include <google/bigtable/v2/data.pb.h>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -43,14 +52,26 @@ namespace emulator {
 
 class PersistentRowTransaction;
 
-/// Keeps each table in its own RocksDB database at `<data_dir>/<table name>`.
+/// RocksDB memory shared by every table of one backend, so that the total is
+/// bounded however many tables and column families there are.
+struct SharedRocksDbMemory {
+  /// Read cache for the blocks of every table's files.
+  std::shared_ptr<rocksdb::Cache> block_cache;
+  /// Caps the memtables of every table; charged to `block_cache`.
+  std::shared_ptr<rocksdb::WriteBufferManager> write_buffer_manager;
+};
+
+SharedRocksDbMemory MakeSharedRocksDbMemory();
+/// Keeps each table in its own RocksDB database at `<data_dir>/tables/<id>`.
 class PersistentBackend final : public Backend {
  public:
   static StatusOr<std::unique_ptr<PersistentBackend>> Open(
       BackendOptions const& options);
 
-  /// Opens every database found under `data_dir`. A table that fails to
-  /// open is logged and skipped.
+  /// Opens every ACTIVE table in `<data_dir>/tables` and destroys the
+  /// leftovers of interrupted creates and deletes. Fails, so that the emulator
+  /// doesn't start, if a table's database doesn't open or two tables have the
+  /// same name.
   StatusOr<std::vector<RestoredTable>> Restore() override;
   StatusOr<std::unique_ptr<TableOperations>> CreateTable(
       google::bigtable::admin::v2::Table const& schema) override;
@@ -60,20 +81,35 @@ class PersistentBackend final : public Backend {
   Status Shutdown() override { return Status(); }
 
  private:
-  explicit PersistentBackend(BackendOptions options)
-      : options_(std::move(options)) {}
+  PersistentBackend(BackendOptions options, std::uint64_t next_table_id)
+      : options_(std::move(options)),
+        memory_(MakeSharedRocksDbMemory()),
+        next_table_id_(next_table_id) {}
+
+  /// `<data_dir>/tables/<id>`, the id zero-padded to six digits.
+  std::filesystem::path TableDir(std::uint64_t id) const;
 
   BackendOptions const options_;
+  SharedRocksDbMemory const memory_;
+  std::atomic<std::uint64_t> next_table_id_;
 };
 
 class PersistentTableOperations
     : public TableOperationsBase<PersistentColumnFamily> {
  public:
   static StatusOr<std::unique_ptr<TableOperations>> CreateNew(
-      std::string const& data_root, google::bigtable::admin::v2::Table& schema);
+      std::filesystem::path const& db_path, SharedRocksDbMemory const& memory,
+      google::bigtable::admin::v2::Table const& schema);
 
-  static StatusOr<std::unique_ptr<TableOperations>> OpenExisting(
-      std::string const& data_root, google::bigtable::admin::v2::Table& schema);
+  /// Builds the operations of the ACTIVE table whose database is open in
+  /// `db`: drops the column families `metadata` doesn't name, opens or
+  /// creates the ones it does, and replays its intent.
+  static StatusOr<std::unique_ptr<TableOperations>> Restore(
+      std::filesystem::path const& db_path, SharedRocksDbMemory const& memory,
+      std::shared_ptr<rocksdb::TransactionDB> db,
+      std::map<std::string, std::shared_ptr<rocksdb::ColumnFamilyHandle>> const&
+          handles_by_name,
+      TableMetadata metadata);
 
   /// `deadline` is not used yet.
   StatusOr<std::unique_ptr<RowTransaction>> NewRowTransaction(
@@ -96,11 +132,9 @@ class PersistentTableOperations
       google::bigtable::admin::v2::Table schema) override;
 
   Status UpdateTable(
-      google::bigtable::admin::v2::Table const& new_schema) override {
-    return PersistSchema(new_schema);
-  }
+      google::bigtable::admin::v2::Table const& new_schema) override;
 
-  Status CommitDeletion() override { return Status(); }
+  Status CommitDeletion() override;
 
   absl::optional<std::chrono::milliseconds> MaintenanceInterval()
       const override {
@@ -110,14 +144,29 @@ class PersistentTableOperations
   Status BackgroundError() const override { return Status(); }
 
   Status Close() override {
+    std::vector<rocksdb::ColumnFamilyHandle*> handles = {
+        db_->DefaultColumnFamily(),
+    };
+    for (auto const& cf : column_families_) {
+      handles.push_back(cf.second->GetRaw());
+    }
+    rocksdb::Status status = db_->SyncWAL();
+    if (status.ok()) {
+      status = db_->Flush(rocksdb::FlushOptions(), handles);
+    }
     column_families_.clear();
     db_.reset();
+    if (!status.ok()) {
+      return InternalError(
+          "Failed to sync and flush the table: " + status.ToString(),
+          GCP_ERROR_INFO().WithMetadata("table", table_name_));
+    }
     return Status();
   }
 
-  std::string const& table_name() const { return table_name_; }
+  std::filesystem::path const& DbPath() const { return db_path_; }
 
-  StatusOr<google::bigtable::admin::v2::Table> LoadSchema() const;
+  StatusOr<TableMetadata> LoadMetadata() const;
 
   std::unique_ptr<rocksdb::Iterator> GetIterator(
       std::shared_ptr<PersistentColumnFamily> const& cf) const {
@@ -130,14 +179,21 @@ class PersistentTableOperations
   friend PersistentRowTransaction;
 
  private:
-  Status PersistSchema(google::bigtable::admin::v2::Table const& schema);
+  Status PersistMetadata(TableMetadata const& metadata);
+
+  /// Creates the column family of `id` and adds it to `column_families_`.
+  Status CreateColumnFamily(
+      std::string const& id,
+      google::bigtable::admin::v2::ColumnFamily const& definition);
+  /// Drops the column family of `id` and removes it from `column_families_`.
+  Status DropColumnFamily(std::string const& id);
 
   StatusOr<std::size_t> GetRowCountEstimate() const;
 
-  Status ReconcileColumnFamiliesToTarget(
-      ::google::bigtable::admin::v2::Table const& target_schema);
-
   std::string table_name_;
+  std::filesystem::path db_path_;
+  /// Options for every column family this table creates.
+  rocksdb::ColumnFamilyOptions column_family_options_;
   /**
    * To close a rocksdb database, in the simplest case it is enough to delete a
    * pointer to it

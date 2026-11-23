@@ -16,12 +16,14 @@
 #include "google/cloud/internal/make_status.h"
 #include "google/cloud/status.h"
 #include "absl/strings/str_format.h"
+#include "bigtable_limits.h"
 #include "column_family.h"
 #include "filter.h"
 #include "filtered_table_stream.h"
 #include "google/protobuf/util/field_mask_util.h"
 #include "in_memory/in_memory_column_family.h"
 #include "range_set.h"
+#include "re2/re2.h"
 #include <google/bigtable/admin/v2/types.pb.h>
 #include <google/bigtable/v2/bigtable.pb.h>
 #include <google/bigtable/v2/data.pb.h>
@@ -106,6 +108,43 @@ Status ValidateAddToCellTransaction(
   return Status();
 }
 
+Status ValidateColumnFamilyId(std::string const& column_family_id) {
+  static auto const* const kColumnFamilyIdPattern =
+      new re2::RE2("[_a-zA-Z0-9][-_.a-zA-Z0-9]{0,63}");
+  if (!re2::RE2::FullMatch(column_family_id, *kColumnFamilyIdPattern)) {
+    return InvalidArgumentError(
+        "Invalid column family ID: it must be 1-64 characters long, start "
+        "with a letter, digit or '_', and contain only letters, digits, '_', "
+        "'-' and '.'.",
+        GCP_ERROR_INFO().WithMetadata("column_family_id", column_family_id));
+  }
+  return Status();
+}
+
+Status ValidateSchema(google::bigtable::admin::v2::Table const& schema) {
+  if (static_cast<std::size_t>(schema.column_families_size()) >
+      kMaxColumnFamiliesPerTable) {
+    return google::cloud::internal::ResourceExhaustedError(
+        "Too many column families: a table can have at most " +
+            std::to_string(kMaxColumnFamiliesPerTable) + ".",
+        GCP_ERROR_INFO().WithMetadata(
+            "limit", std::to_string(kMaxColumnFamiliesPerTable)));
+  }
+  for (auto const& column_family : schema.column_families()) {
+    auto status = ValidateColumnFamilyId(column_family.first);
+    if (!status.ok()) {
+      return status;
+    }
+    if (column_family.second.has_value_type()) {
+      status = ValidateValueType(column_family.second.value_type());
+      if (!status.ok()) {
+        return status;
+      }
+    }
+  }
+  return Status();
+}
+
 StatusOr<google::bigtable::admin::v2::Table>
 ApplyModifyColumnFamiliesToSchemaOnly(
     google::bigtable::admin::v2::ModifyColumnFamiliesRequest const& request,
@@ -167,7 +206,7 @@ ApplyModifyColumnFamiliesToSchemaOnly(
 
       FieldMaskUtil::MergeMessageTo(modification.update(), effective_mask,
                                     FieldMaskUtil::MergeOptions(),
-                                    &(cf_it->second));
+                                    &cf_it->second);
     } else if (modification.has_create()) {
       if (schema.column_families().find(modification.id()) !=
           schema.column_families().end()) {
@@ -189,6 +228,10 @@ ApplyModifyColumnFamiliesToSchemaOnly(
           GCP_ERROR_INFO().WithMetadata("modification",
                                         modification.DebugString()));
     }
+  }
+  auto status = ValidateSchema(schema);
+  if (!status.ok()) {
+    return status;
   }
   return schema;
 }

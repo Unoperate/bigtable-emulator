@@ -17,6 +17,7 @@
 #include "google/cloud/internal/make_status.h"
 #include "google/cloud/status.h"
 #include "google/cloud/status_or.h"
+#include "absl/strings/numbers.h"
 #include "absl/strings/str_format.h"
 #include "column_family.h"
 #include "filter.h"
@@ -24,8 +25,10 @@
 #include "in_memory/in_memory_column_family.h"
 #include "persistent/key_coder.h"
 #include "persistent/persistent_column_family.h"
-#include "persistent/redolog.h"
+#include "persistent/table_metadata.pb.h"
 #include "range_set.h"
+#include "rocksdb/env.h"
+#include "rocksdb/table.h"
 #include "rocksdb/utilities/transaction.h"
 #include "rocksdb/utilities/transaction_db.h"
 #include "table_operations.h"
@@ -35,6 +38,7 @@
 #include <google/bigtable/v2/bigtable.pb.h>
 #include <google/bigtable/v2/data.pb.h>
 #include <google/protobuf/field_mask.pb.h>
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -44,6 +48,7 @@
 #include <memory>
 #include <string>
 #include <system_error>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -67,95 +72,318 @@ std::shared_ptr<rocksdb::ColumnFamilyHandle> AdoptHandle(
       });
 }
 
-constexpr char kSchemaKey[] = "t_emulator:meta:schema_pb";
+constexpr char kTableMetadataKey[] = "t_emulator:meta:table_metadata_pb";
+
+constexpr std::size_t kBlockCacheBytes = 256 << 20;
+constexpr std::size_t kWriteBufferBytes = 128 << 20;
+
+rocksdb::ColumnFamilyOptions MakeColumnFamilyOptions(
+    SharedRocksDbMemory const& memory) {
+  rocksdb::BlockBasedTableOptions table_options;
+  table_options.block_cache = memory.block_cache;
+  table_options.cache_index_and_filter_blocks = true;
+  rocksdb::ColumnFamilyOptions options;
+  options.table_factory.reset(
+      rocksdb::NewBlockBasedTableFactory(table_options));
+  options.max_write_buffer_size_to_maintain = 1;
+  return options;
+}
+
+rocksdb::Options MakeDatabaseOptions(SharedRocksDbMemory const& memory) {
+  rocksdb::DBOptions db_options;
+  db_options.write_buffer_manager = memory.write_buffer_manager;
+  return rocksdb::Options(db_options, MakeColumnFamilyOptions(memory));
+}
+
+struct OpenedDatabase {
+  std::shared_ptr<rocksdb::TransactionDB> db;
+  std::map<std::string, std::shared_ptr<rocksdb::ColumnFamilyHandle>>
+      handles_by_name;
+};
+
+/// Opens the database in `db_path` with every column family it has.
+StatusOr<OpenedDatabase> OpenDatabase(std::filesystem::path const& db_path,
+                                      SharedRocksDbMemory const& memory) {
+  rocksdb::Options options = MakeDatabaseOptions(memory);
+  rocksdb::TransactionDBOptions txn_options;
+  txn_options.lock_mgr_handle.reset(rocksdb::NewRangeLockManager(nullptr));
+
+  std::vector<std::string> names;
+  std::vector<rocksdb::ColumnFamilyDescriptor> descs;
+  std::vector<rocksdb::ColumnFamilyHandle*> raw_handles;
+  rocksdb::TransactionDB* raw_db = nullptr;
+  auto status =
+      rocksdb::DB::ListColumnFamilies(options, db_path.string(), &names);
+  if (status.ok()) {
+    for (auto const& name : names) {
+      descs.emplace_back(name, MakeColumnFamilyOptions(memory));
+    }
+    status = rocksdb::TransactionDB::Open(
+        options, txn_options, db_path.string(), descs, &raw_handles, &raw_db);
+  }
+  if (!status.ok()) {
+    auto message = "Failed to open the table's database: " + status.ToString();
+    if (status.IsCorruption()) {
+      return DataLossError(std::move(message), GCP_ERROR_INFO().WithMetadata(
+                                                   "path", db_path.string()));
+    }
+    return InternalError(std::move(message), GCP_ERROR_INFO().WithMetadata(
+                                                 "path", db_path.string()));
+  }
+
+  OpenedDatabase opened;
+  opened.db.reset(raw_db);
+  for (std::size_t i = 0; i < descs.size(); ++i) {
+    opened.handles_by_name[descs[i].name] =
+        AdoptHandle(opened.db, raw_handles[i]);
+  }
+  return opened;
+}
+
+StatusOr<absl::optional<TableMetadata>> ReadMetadata(
+    rocksdb::TransactionDB& db) {
+  std::string serialized;
+  rocksdb::Status s = db.Get(rocksdb::ReadOptions(), db.DefaultColumnFamily(),
+                             kTableMetadataKey, &serialized);
+  if (s.IsNotFound()) {
+    return absl::optional<TableMetadata>();
+  }
+  if (!s.ok()) {
+    return InternalError(
+        "Failed to read table metadata: " + s.ToString(),
+        GCP_ERROR_INFO().WithMetadata("key", kTableMetadataKey));
+  }
+  TableMetadata metadata;
+  if (!metadata.ParseFromString(serialized)) {
+    return DataLossError(
+        "Failed to parse table metadata.",
+        GCP_ERROR_INFO().WithMetadata("key", kTableMetadataKey));
+  }
+  return absl::optional<TableMetadata>(std::move(metadata));
+}
+
+Status SyncDirectory(std::filesystem::path const& path) {
+  std::unique_ptr<rocksdb::Directory> dir;
+  auto s = rocksdb::Env::Default()->NewDirectory(path.string(), &dir);
+  if (s.ok()) {
+    s = dir->Fsync();
+  }
+  if (!s.ok()) {
+    return InternalError("Failed to sync directory: " + s.ToString(),
+                         GCP_ERROR_INFO().WithMetadata("path", path.string()));
+  }
+  return Status();
+}
+
+/// Destroys the closed database in `db_path` and removes the directory.
+Status DestroyDirectory(std::filesystem::path const& db_path) {
+  std::error_code ec;
+  std::filesystem::remove(db_path / "CURRENT", ec);
+  if (ec) {
+    return InternalError(
+        "Failed to remove the table's CURRENT file: " + ec.message(),
+        GCP_ERROR_INFO().WithMetadata("path", db_path.string()));
+  }
+  auto status = SyncDirectory(db_path);
+  if (!status.ok()) {
+    return status;
+  }
+  auto s = rocksdb::DestroyDB(db_path.string(), rocksdb::Options());
+  if (!s.ok()) {
+    return InternalError(
+        "Failed to destroy the table's database: " + s.ToString(),
+        GCP_ERROR_INFO().WithMetadata("path", db_path.string()));
+  }
+  std::filesystem::remove_all(db_path, ec);
+  if (ec) {
+    return InternalError(
+        "Failed to remove the table directory: " + ec.message(),
+        GCP_ERROR_INFO().WithMetadata("path", db_path.string()));
+  }
+  return Status();
+}
+
+Status WithTablePath(Status const& status,
+                     std::filesystem::path const& db_path) {
+  auto info = GCP_ERROR_INFO().WithMetadata("path", db_path.string());
+  for (auto const& [key, value] : status.error_info().metadata()) {
+    info.WithMetadata(key, value);
+  }
+  return Status(status.code(), status.message(),
+                std::move(info).Build(status.code()));
+}
+
+/// Lists the entries of `<data_dir>/tables` named by a table id; logs and
+/// skips the others. A missing directory holds no tables.
+StatusOr<std::vector<std::filesystem::path>> ListTableDirectories(
+    std::string const& data_dir) {
+  std::vector<std::filesystem::path> res;
+  auto const tables_dir = std::filesystem::path(data_dir) / "tables";
+  std::error_code ec;
+  for (auto it = std::filesystem::directory_iterator(tables_dir, ec);
+       !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
+    auto const name = it->path().filename().string();
+    std::uint64_t id = 0;
+    if (!absl::SimpleAtoi(name, &id) || absl::StrFormat("%06d", id) != name) {
+      std::cerr << "Skipping unexpected entry in the tables directory: "
+                << it->path().string() << "\n";
+      continue;
+    }
+    res.push_back(it->path());
+  }
+  if (ec && ec != std::errc::no_such_file_or_directory) {
+    return InternalError(
+        "Failed to read the tables directory: " + ec.message(),
+        GCP_ERROR_INFO().WithMetadata("path", tables_dir.string()));
+  }
+  return res;
+}
 
 }  // anonymous namespace
 
+SharedRocksDbMemory MakeSharedRocksDbMemory() {
+  SharedRocksDbMemory memory;
+  memory.block_cache = rocksdb::NewLRUCache(kBlockCacheBytes);
+  memory.write_buffer_manager = std::make_shared<rocksdb::WriteBufferManager>(
+      kWriteBufferBytes, memory.block_cache);
+  return memory;
+}
+
 StatusOr<std::unique_ptr<PersistentBackend>> PersistentBackend::Open(
     BackendOptions const& options) {
-  return std::unique_ptr<PersistentBackend>(new PersistentBackend(options));
+  auto table_dirs = ListTableDirectories(options.data_dir);
+  if (!table_dirs) {
+    return table_dirs.status();
+  }
+  std::uint64_t next_table_id = 1;
+  for (auto const& db_path : *table_dirs) {
+    std::uint64_t id = 0;
+    if (absl::SimpleAtoi(db_path.filename().string(), &id)) {
+      next_table_id = std::max(next_table_id, id + 1);
+    }
+  }
+  return std::unique_ptr<PersistentBackend>(
+      new PersistentBackend(options, next_table_id));
+}
+
+std::filesystem::path PersistentBackend::TableDir(std::uint64_t id) const {
+  return std::filesystem::path(options_.data_dir) / "tables" /
+         absl::StrFormat("%06d", id);
 }
 
 StatusOr<std::vector<RestoredTable>> PersistentBackend::Restore() {
   std::vector<RestoredTable> res;
-  std::error_code ec;
-  std::filesystem::path root(options_.data_dir);
-  if (!std::filesystem::exists(root, ec)) {
-    return res;
+  std::map<std::string, std::filesystem::path> path_by_name;
+  auto table_dirs = ListTableDirectories(options_.data_dir);
+  if (!table_dirs) {
+    return table_dirs.status();
   }
-
-  for (auto it = std::filesystem::recursive_directory_iterator(
-           root, std::filesystem::directory_options::skip_permission_denied,
-           ec);
-       it != std::filesystem::recursive_directory_iterator();
-       it.increment(ec)) {
-    if (ec) {
-      ec.clear();
+  for (auto const& db_path : *table_dirs) {
+    std::error_code exists_ec;
+    bool const has_current =
+        std::filesystem::exists(db_path / "CURRENT", exists_ec);
+    if (exists_ec) {
+      return InternalError(
+          "Failed to check the table directory: " + exists_ec.message(),
+          GCP_ERROR_INFO().WithMetadata("path", db_path.string()));
+    }
+    if (!has_current) {
+      std::error_code remove_ec;
+      std::filesystem::remove_all(db_path, remove_ec);
+      if (remove_ec) {
+        return InternalError(
+            "Failed to remove the table directory: " + remove_ec.message(),
+            GCP_ERROR_INFO().WithMetadata("path", db_path.string()));
+      }
       continue;
     }
-    if (!it->is_directory(ec)) {
+
+    auto opened = OpenDatabase(db_path, memory_);
+    if (!opened) {
+      return opened.status();
+    }
+    auto maybe_metadata = ReadMetadata(*opened->db);
+    if (!maybe_metadata) {
+      return WithTablePath(maybe_metadata.status(), db_path);
+    }
+    if (!*maybe_metadata || (*maybe_metadata)->state() == STATE_CREATING ||
+        (*maybe_metadata)->state() == STATE_DELETING) {
+      opened->handles_by_name.clear();
+      opened->db.reset();
+      auto status = DestroyDirectory(db_path);
+      if (!status.ok()) {
+        return status;
+      }
       continue;
     }
-
-    auto db_path = it->path();
-    auto current = db_path / "CURRENT";
-    if (!std::filesystem::exists(current, ec)) {
-      continue;
+    auto metadata = **std::move(maybe_metadata);
+    if (metadata.state() != STATE_ACTIVE) {
+      return FailedPreconditionError(
+          "Table has an unexpected state.",
+          GCP_ERROR_INFO()
+              .WithMetadata("path", db_path.string())
+              .WithMetadata("state", std::to_string(metadata.state())));
+    }
+    auto status = ValidateSchema(metadata.schema());
+    if (!status.ok()) {
+      return DataLossError(
+          "The table's schema is invalid: " + status.message(),
+          GCP_ERROR_INFO().WithMetadata("path", db_path.string()));
     }
 
-    it.disable_recursion_pending();
+    auto const& name = metadata.schema().name();
+    auto [seen, inserted] = path_by_name.emplace(name, db_path);
+    if (!inserted) {
+      return FailedPreconditionError(
+          "Two tables have the same name.",
+          GCP_ERROR_INFO()
+              .WithMetadata("table_name", name)
+              .WithMetadata("path", seen->second.string())
+              .WithMetadata("other_path", db_path.string()));
+    }
 
-    auto table_name = db_path.lexically_relative(root).generic_string();
-    btadmin::Table schema;
-    schema.set_name(table_name);
-    auto maybe_operations =
-        PersistentTableOperations::OpenExisting(options_.data_dir, schema);
+    auto schema = metadata.schema();
+    auto maybe_operations = PersistentTableOperations::Restore(
+        db_path, memory_, std::move(opened->db), opened->handles_by_name,
+        std::move(metadata));
     if (!maybe_operations) {
-      std::cerr << "Restore: failed to load table " << table_name << ": "
-                << maybe_operations.status() << "\n";
-      continue;
+      return WithTablePath(maybe_operations.status(), db_path);
     }
-
-    res.push_back(RestoredTable{std::move(table_name), std::move(schema),
-                                *std::move(maybe_operations)});
+    auto table_name = schema.name();
+    res.push_back(RestoredTable{
+        std::move(table_name),
+        std::move(schema),
+        *std::move(maybe_operations),
+    });
   }
   return res;
 }
 
 StatusOr<std::unique_ptr<TableOperations>> PersistentBackend::CreateTable(
     btadmin::Table const& schema) {
-  auto schema_copy = schema;
-  return PersistentTableOperations::CreateNew(options_.data_dir, schema_copy);
+  return PersistentTableOperations::CreateNew(TableDir(next_table_id_++),
+                                              memory_, schema);
 }
 
 void PersistentBackend::DestroyTable(
     std::unique_ptr<TableOperations> operations) {
-  auto db_path =
-      std::filesystem::path(options_.data_dir) /
-      static_cast<PersistentTableOperations&>(*operations).table_name();
+  auto db_path = static_cast<PersistentTableOperations&>(*operations).DbPath();
 
   /**
    * DestroyDB needs the RocksDB instance closed. Every column family, column
    * family handle and live cell stream holds a shared_ptr to the
-   * TransactionDB, so close it explicitly before destroying.
+   * TransactionDB, so release them all before destroying.
    */
-  operations->Close();
   operations.reset();
-
-  rocksdb::Options options;
-  auto s = rocksdb::DestroyDB(db_path.string(), options);
-  std::error_code ec;
-  std::filesystem::remove_all(db_path, ec);
-  if (!s.ok()) {
-    std::cerr << "Failed to destroy table RocksDB at " << db_path.string()
-              << "; " << s.ToString() << "\n";
+  auto status = DestroyDirectory(db_path);
+  if (!status.ok()) {
+    std::cerr << "DestroyTable: " << status << "\n";
   }
 }
 
 StatusOr<std::unique_ptr<TableOperations>> PersistentTableOperations::CreateNew(
-    std::string const& data_root, google::bigtable::admin::v2::Table& schema) {
-  std::string rel = schema.name();
-  std::filesystem::path db_path = std::filesystem::path(data_root) / rel;
+    std::filesystem::path const& db_path, SharedRocksDbMemory const& memory,
+    google::bigtable::admin::v2::Table const& schema) {
   std::filesystem::path parent_path = db_path.parent_path();
 
   std::error_code ec;
@@ -167,38 +395,16 @@ StatusOr<std::unique_ptr<TableOperations>> PersistentTableOperations::CreateNew(
         GCP_ERROR_INFO().WithMetadata("schema", schema.DebugString()));
   }
 
-  rocksdb::Options options;
+  rocksdb::Options options = MakeDatabaseOptions(memory);
   rocksdb::TransactionDBOptions txn_options;
   txn_options.lock_mgr_handle.reset(rocksdb::NewRangeLockManager(nullptr));
 
   options.create_if_missing = true;
-  options.create_missing_column_families = false;
-  std::vector<std::string> cf_names;
-  bool db_exists = std::filesystem::exists(db_path / "CURRENT");
-
-  if (!db_exists) {
-    cf_names = {rocksdb::kDefaultColumnFamilyName};
-  } else {
-    rocksdb::Status list_s =
-        rocksdb::DB::ListColumnFamilies(options, db_path.string(), &cf_names);
-    if (!list_s.ok()) {
-      auto msg = "Failed to list column families for table at " +
-                 db_path.string() + "; " + list_s.ToString();
-      return InternalError(
-          msg, GCP_ERROR_INFO().WithMetadata("path", db_path.string()));
-    }
-  }
-
-  std::vector<rocksdb::ColumnFamilyDescriptor> descs;
-  descs.reserve(cf_names.size());
-  for (auto const& n : cf_names) {
-    descs.emplace_back(n, rocksdb::ColumnFamilyOptions());
-  }
+  options.error_if_exists = true;
 
   rocksdb::TransactionDB* raw_db = nullptr;
-  std::vector<rocksdb::ColumnFamilyHandle*> raw_handles;
   rocksdb::Status status = rocksdb::TransactionDB::Open(
-      options, txn_options, db_path.string(), descs, &raw_handles, &raw_db);
+      options, txn_options, db_path.string(), &raw_db);
   if (!status.ok()) {
     return InternalError(
         "failed to open rocksdb instance; " + status.ToString(),
@@ -209,157 +415,69 @@ StatusOr<std::unique_ptr<TableOperations>> PersistentTableOperations::CreateNew(
       std::make_unique<PersistentTableOperations>();
   res->db_.reset(raw_db);
   res->table_name_ = schema.name();
+  res->db_path_ = db_path;
+  res->column_family_options_ = MakeColumnFamilyOptions(memory);
 
-  std::map<std::string, std::shared_ptr<rocksdb::ColumnFamilyHandle>>
-      handles_by_name;
-  for (std::size_t i = 0; i < descs.size(); ++i) {
-    handles_by_name[descs[i].name] = AdoptHandle(res->db_, raw_handles[i]);
-  }
-
-  auto maybe_schema = res->LoadSchema();
-  if (maybe_schema.ok()) {
-    schema = std::move(maybe_schema.value());
-  } else if (maybe_schema.status().code() == StatusCode::kNotFound) {
-    auto st = res->PersistSchema(schema);
+  for (auto const& dir : {parent_path, parent_path.parent_path()}) {
+    auto st = SyncDirectory(dir);
     if (!st.ok()) {
       return st;
     }
-  } else {
-    return maybe_schema.status();
+  }
+
+  TableMetadata metadata;
+  *metadata.mutable_schema() = schema;
+  metadata.set_state(STATE_CREATING);
+  auto st = res->PersistMetadata(metadata);
+  if (!st.ok()) {
+    return st;
   }
 
   for (auto const& cfd : schema.column_families()) {
-    absl::optional<google::bigtable::admin::v2::Type> opt_value_type =
-        absl::nullopt;
-    if (cfd.second.has_value_type()) {
-      opt_value_type = cfd.second.value_type();
-    }
-
-    if (opt_value_type.has_value()) {
-      auto new_cf = PersistentColumnFamily::ConstructAggregateColumnFamily(
-          opt_value_type.value(), res->db_, cfd.first);
-      if (!new_cf) {
-        return new_cf.status();
-      }
-      res->column_families_.emplace(cfd.first, new_cf.value());
-      handles_by_name[cfd.first] = new_cf.value()->GetHandle();
-    } else {
-      rocksdb::ColumnFamilyOptions opts;
-      auto maybe_new_cf =
-          PersistentColumnFamily::Create(res->db_, opts, cfd.first);
-      if (!maybe_new_cf.ok()) {
-        return InternalError(
-            "failed to create column family " + cfd.first +
-                "; Error status: " + maybe_new_cf.status().message(),
-            GCP_ERROR_INFO().WithMetadata("schema", schema.DebugString()));
-      }
-      res->column_families_.emplace(cfd.first, maybe_new_cf.value());
-      handles_by_name[cfd.first] = maybe_new_cf.value()->GetHandle();
+    auto status = res->CreateColumnFamily(cfd.first, cfd.second);
+    if (!status.ok()) {
+      return status;
     }
   }
 
-  {
-    SchemaRedoLog redo(res->db_);
-    auto pending = redo.Load();
-    if (pending.ok()) {
-      auto st = res->ReconcileColumnFamiliesToTarget(pending.value());
-      if (!st.ok()) {
-        return st;
-      }
-
-      st = res->PersistSchema(pending.value());
-      if (!st.ok()) {
-        return st;
-      }
-
-      st = redo.Finish();
-      if (!st.ok()) {
-        return st;
-      }
-
-      schema = pending.value();
-    } else if (pending.status().code() != StatusCode::kNotFound) {
-      return pending.status();
-    }
+  // The commit point: the table exists once its metadata is ACTIVE. A
+  // failure before this, e.g. while creating a column family, leaves a
+  // database with no metadata or with CREATING, which startup does not
+  // restore. A failure of this write may still have reached the WAL, so the
+  // outcome is unknown until the next startup.
+  metadata.set_state(STATE_ACTIVE);
+  st = res->PersistMetadata(metadata);
+  if (!st.ok()) {
+    return UnavailableError(
+        "Failed to commit the table creation: " + st.message(),
+        GCP_ERROR_INFO().WithMetadata("table", schema.name()));
   }
   return StatusOr<std::unique_ptr<TableOperations>>(std::move(res));
 }
 
-StatusOr<std::unique_ptr<TableOperations>>
-PersistentTableOperations::OpenExisting(
-    std::string const& data_root, google::bigtable::admin::v2::Table& schema) {
-  bool const create_if_missing = false;
-
-  std::string rel = schema.name();
-  std::filesystem::path db_path = std::filesystem::path(data_root) / rel;
-  std::filesystem::path parent_path = db_path.parent_path();
-
-  std::error_code ec;
-  std::filesystem::create_directories(parent_path, ec);
-  if (ec) {
-    return InternalError(
-        "failed to create directory: " + parent_path.string() +
-            "; Error status: " + ec.message(),
-        GCP_ERROR_INFO().WithMetadata("schema", schema.DebugString()));
-  }
-
-  rocksdb::Options options;
-  rocksdb::TransactionDBOptions txn_options;
-  txn_options.lock_mgr_handle.reset(rocksdb::NewRangeLockManager(nullptr));
-
-  options.create_if_missing = create_if_missing;
-  options.create_missing_column_families = false;
-
-  std::vector<std::string> cf_names;
-  bool db_exists = std::filesystem::exists(db_path / "CURRENT");
-
-  if (!db_exists) {
-    return NotFoundError(
-        "No such table; database directory not initialized.",
-        GCP_ERROR_INFO().WithMetadata("path", db_path.string()));
-  }
-
-  rocksdb::Status list_s =
-      rocksdb::DB::ListColumnFamilies(options, db_path.string(), &cf_names);
-  if (!list_s.ok()) {
-    auto msg = "Failed to list column families for table at " +
-               db_path.string() + "; " + list_s.ToString();
-    return InternalError(
-        msg, GCP_ERROR_INFO().WithMetadata("path", db_path.string()));
-  }
-
-  std::vector<rocksdb::ColumnFamilyDescriptor> descs;
-  descs.reserve(cf_names.size());
-  for (auto const& n : cf_names) {
-    descs.emplace_back(n, rocksdb::ColumnFamilyOptions());
-  }
-
-  rocksdb::TransactionDB* raw_db = nullptr;
-  std::vector<rocksdb::ColumnFamilyHandle*> raw_handles;
-  rocksdb::Status status = rocksdb::TransactionDB::Open(
-      options, txn_options, db_path.string(), descs, &raw_handles, &raw_db);
-  if (!status.ok()) {
-    return NotFoundError(
-        "No such table; " + status.ToString(),
-        GCP_ERROR_INFO().WithMetadata("path", db_path.string()));
-  }
-
+StatusOr<std::unique_ptr<TableOperations>> PersistentTableOperations::Restore(
+    std::filesystem::path const& db_path, SharedRocksDbMemory const& memory,
+    std::shared_ptr<rocksdb::TransactionDB> db,
+    std::map<std::string, std::shared_ptr<rocksdb::ColumnFamilyHandle>> const&
+        handles_by_name,
+    TableMetadata metadata) {
   std::unique_ptr<PersistentTableOperations> res =
       std::make_unique<PersistentTableOperations>();
-  res->db_.reset(raw_db);
+  res->db_ = std::move(db);
+  res->db_path_ = db_path;
+  res->column_family_options_ = MakeColumnFamilyOptions(memory);
+  auto const& schema = metadata.schema();
   res->table_name_ = schema.name();
 
-  std::map<std::string, std::shared_ptr<rocksdb::ColumnFamilyHandle>>
-      handles_by_name;
-  for (std::size_t i = 0; i < descs.size(); ++i) {
-    handles_by_name[descs[i].name] = AdoptHandle(res->db_, raw_handles[i]);
+  for (auto const& id : metadata.intent().families_to_empty()) {
+    if (schema.column_families().find(id) == schema.column_families().end()) {
+      return DataLossError(
+          "The intent names a column family missing from the schema.",
+          GCP_ERROR_INFO()
+              .WithMetadata("path", db_path.string())
+              .WithMetadata("column_family", id));
+    }
   }
-
-  auto maybe_schema = res->LoadSchema();
-  if (!maybe_schema.ok()) {
-    return maybe_schema.status();
-  }
-  schema = std::move(maybe_schema.value());
 
   for (auto const& cfd : schema.column_families()) {
     absl::optional<google::bigtable::admin::v2::Type> opt_value_type =
@@ -368,7 +486,7 @@ PersistentTableOperations::OpenExisting(
       opt_value_type = cfd.second.value_type();
     }
 
-    auto hit = handles_by_name.find(cfd.first);
+    auto hit = handles_by_name.find(RocksDbColumnFamilyName(cfd.first));
     if (hit != handles_by_name.end()) {
       auto maybe_cf = PersistentColumnFamily::OpenExisting(
           res->db_, hit->second, opt_value_type);
@@ -379,51 +497,51 @@ PersistentTableOperations::OpenExisting(
       continue;
     }
 
-    if (opt_value_type.has_value()) {
-      auto new_cf = PersistentColumnFamily::ConstructAggregateColumnFamily(
-          opt_value_type.value(), res->db_, cfd.first);
-      if (!new_cf) {
-        return new_cf.status();
-      }
-      res->column_families_.emplace(cfd.first, new_cf.value());
-      handles_by_name[cfd.first] = new_cf.value()->GetHandle();
-    } else {
-      rocksdb::ColumnFamilyOptions opts;
-      auto maybe_new_cf =
-          PersistentColumnFamily::Create(res->db_, opts, cfd.first);
-      if (!maybe_new_cf.ok()) {
-        return InternalError(
-            "failed to create column family " + cfd.first +
-                "; Error status: " + maybe_new_cf.status().message(),
-            GCP_ERROR_INFO().WithMetadata("schema", schema.DebugString()));
-      }
-      res->column_families_.emplace(cfd.first, maybe_new_cf.value());
-      handles_by_name[cfd.first] = maybe_new_cf.value()->GetHandle();
+    auto const& to_empty = metadata.intent().families_to_empty();
+    if (std::find(to_empty.begin(), to_empty.end(), cfd.first) ==
+        to_empty.end()) {
+      return DataLossError("A column family named by the schema is missing.",
+                           GCP_ERROR_INFO()
+                               .WithMetadata("path", db_path.string())
+                               .WithMetadata("column_family", cfd.first));
+    }
+    auto status = res->CreateColumnFamily(cfd.first, cfd.second);
+    if (!status.ok()) {
+      return status;
     }
   }
 
-  {
-    SchemaRedoLog redo(res->db_);
-    auto pending = redo.Load();
-    if (pending.ok()) {
-      auto st = res->ReconcileColumnFamiliesToTarget(pending.value());
-      if (!st.ok()) {
-        return st;
-      }
+  std::unordered_set<std::string> named;
+  for (auto const& cfd : schema.column_families()) {
+    named.insert(RocksDbColumnFamilyName(cfd.first));
+  }
+  for (auto const& [name, handle] : handles_by_name) {
+    if (name == rocksdb::kDefaultColumnFamilyName || named.count(name) != 0) {
+      continue;
+    }
+    auto drop_status = res->db_->DropColumnFamily(handle.get());
+    if (!drop_status.ok()) {
+      return InternalError(
+          "Failed to drop column family: " + drop_status.ToString(),
+          GCP_ERROR_INFO().WithMetadata("column_family", name));
+    }
+  }
 
-      st = res->PersistSchema(pending.value());
-      if (!st.ok()) {
-        return st;
+  if (metadata.has_intent()) {
+    for (auto const& id : metadata.intent().families_to_empty()) {
+      auto status = res->DropColumnFamily(id);
+      if (!status.ok()) {
+        return status;
       }
-
-      st = redo.Finish();
-      if (!st.ok()) {
-        return st;
+      status = res->CreateColumnFamily(id, schema.column_families().at(id));
+      if (!status.ok()) {
+        return status;
       }
-
-      schema = pending.value();
-    } else if (pending.status().code() != StatusCode::kNotFound) {
-      return pending.status();
+    }
+    metadata.clear_intent();
+    auto status = res->PersistMetadata(metadata);
+    if (!status.ok()) {
+      return status;
     }
   }
 
@@ -530,155 +648,215 @@ StatusOr<google::bigtable::admin::v2::Table>
 PersistentTableOperations::ModifyColumnFamilies(
     google::bigtable::admin::v2::ModifyColumnFamiliesRequest const& request,
     google::bigtable::admin::v2::Table schema) {
-  {
-    SchemaRedoLog redo(db_);
-    auto pending = redo.Load();
-    if (pending.ok()) {
-      auto st = ReconcileColumnFamiliesToTarget(pending.value());
-      if (!st.ok()) {
-        return st;
-      }
-
-      st = PersistSchema(pending.value());
-      if (!st.ok()) {
-        return st;
-      }
-
-      st = redo.Finish();
-      if (!st.ok()) {
-        return st;
-      }
-
-      schema = pending.value();
-    } else if (pending.status().code() != StatusCode::kNotFound) {
-      return pending.status();
-    }
-  }
-
-  auto maybe_target = ApplyModifyColumnFamiliesToSchemaOnly(request, schema);
+  auto maybe_target =
+      ApplyModifyColumnFamiliesToSchemaOnly(request, std::move(schema));
   if (!maybe_target) {
     return maybe_target.status();
   }
-  auto target_schema = maybe_target.value();
 
-  SchemaRedoLog redo(db_);
-  auto st = redo.Begin(target_schema);
-  if (!st.ok()) {
-    return st;
+  auto unavailable = [this](Status const& status) {
+    return UnavailableError(
+        "Failed to apply the column family changes: " + status.message(),
+        GCP_ERROR_INFO().WithMetadata("table", table_name_));
+  };
+
+  // Replays the request in order. The shared validation above has already
+  // rejected every invalid sequence, e.g. a create of a family that exists.
+  std::unordered_set<std::string> families_to_create;
+  std::unordered_set<std::string> families_to_recreate;
+  std::unordered_set<std::string> families_to_drop;
+  for (auto const& modification : request.modifications()) {
+    auto const& id = modification.id();
+    if (modification.drop()) {
+      if (families_to_create.erase(id) == 0) {
+        families_to_recreate.erase(id);
+        families_to_drop.insert(id);
+      }
+    } else if (modification.has_create()) {
+      if (families_to_drop.erase(id) != 0) {
+        families_to_recreate.insert(id);
+      } else {
+        families_to_create.insert(id);
+      }
+    }
   }
 
-  st = ReconcileColumnFamiliesToTarget(target_schema);
-  if (!st.ok()) {
-    return st;
+  // Create the intent that we will persist in the metadata.
+  Intent intent;
+  for (auto const& id : families_to_recreate) {
+    intent.add_families_to_empty(id);
   }
 
-  st = PersistSchema(target_schema);
-  if (!st.ok()) {
-    return st;
+  auto const& target = maybe_target.value();
+  std::vector<std::string> created;
+  for (auto const& id : families_to_create) {
+    auto status = CreateColumnFamily(id, target.column_families().at(id));
+    if (!status.ok()) {
+      for (auto const& created_id : created) {
+        if (!DropColumnFamily(created_id).ok()) {
+          return unavailable(status);
+        }
+      }
+      return status;
+    }
+    created.push_back(id);
   }
 
-  st = redo.Finish();
-  if (!st.ok()) {
-    return st;
+  TableMetadata metadata;
+  *metadata.mutable_schema() = target;
+  metadata.set_state(STATE_ACTIVE);
+  if (!families_to_recreate.empty()) {
+    *metadata.mutable_intent() = std::move(intent);
+  }
+  // First commit point. A failure while creating the column families above
+  // drops the ones already created and applies nothing; if that drop fails,
+  // the table is marked unavailable. A failure of this write, or one before it
+  // that could not be undone, leaves column families the committed schema
+  // doesn't name, which the next startup drops.
+  // Once it succeeds, a later failure is completed at startup: the intent
+  // says which families to drop and re-create, and the persisted schema
+  // which column families to drop.
+  auto status = PersistMetadata(metadata);
+  if (!status.ok()) {
+    return unavailable(status);
   }
 
-  return target_schema;
+  for (auto const& id : families_to_recreate) {
+    status = DropColumnFamily(id);
+    if (!status.ok()) {
+      return unavailable(status);
+    }
+    status = CreateColumnFamily(id, target.column_families().at(id));
+    if (!status.ok()) {
+      return unavailable(status);
+    }
+  }
+
+  // Second commit point, made only when there is an intent: clears it. A
+  // failure between the two commits is completed at startup by replaying the
+  // intent, which is safe to repeat: dropping and re-creating an empty column
+  // family changes nothing. Once it succeeds, a later failure only leaves
+  // dropped column families behind, which startup drops because the schema
+  // doesn't name them.
+  if (metadata.has_intent()) {
+    metadata.clear_intent();
+    status = PersistMetadata(metadata);
+    if (!status.ok()) {
+      return unavailable(status);
+    }
+  }
+
+  for (auto const& id : families_to_drop) {
+    status = DropColumnFamily(id);
+    if (!status.ok()) {
+      return unavailable(status);
+    }
+  }
+
+  return *std::move(maybe_target);
 }
 
-Status PersistentTableOperations::ReconcileColumnFamiliesToTarget(
-    btadmin::Table const& target_schema) {
-  for (auto const& [cf_name, cf_def] : target_schema.column_families()) {
-    if (column_families_.find(cf_name) != column_families_.end()) {
-      continue;
-    }
-
-    std::shared_ptr<PersistentColumnFamily> cf;
-    if (cf_def.has_value_type()) {
-      auto maybe_cf = PersistentColumnFamily::ConstructAggregateColumnFamily(
-          cf_def.value_type(), db_, cf_name);
-      if (!maybe_cf) {
-        return maybe_cf.status();
-      }
-      cf = std::move(maybe_cf.value());
-    } else {
-      auto maybe_cf = PersistentColumnFamily::Create(
-          db_, rocksdb::ColumnFamilyOptions(), cf_name);
-      if (!maybe_cf.ok()) {
-        return InternalError(
-            "Failed to create CF: " + maybe_cf.status().message(),
-            GCP_ERROR_INFO().WithMetadata("cf", cf_name));
-      }
-      cf = maybe_cf.value();
-    }
-    column_families_.emplace(cf_name, std::move(cf));
+Status PersistentTableOperations::UpdateTable(
+    google::bigtable::admin::v2::Table const& new_schema) {
+  TableMetadata metadata;
+  *metadata.mutable_schema() = new_schema;
+  metadata.set_state(STATE_ACTIVE);
+  auto status = PersistMetadata(metadata);
+  if (!status.ok()) {
+    return UnavailableError(
+        "Failed to commit the table update: " + status.message(),
+        GCP_ERROR_INFO().WithMetadata("table", table_name_));
   }
-
-  for (auto it = column_families_.begin(); it != column_families_.end();) {
-    auto const& name = it->first;
-    if (target_schema.column_families().find(name) !=
-        target_schema.column_families().end()) {
-      ++it;
-      continue;
-    }
-
-    auto handle = it->second->GetHandle();
-    rocksdb::Status s = db_->DropColumnFamily(handle.get());
-    if (!s.ok()) {
-      return InternalError("Failed to drop CF in RocksDB: " + s.ToString(),
-                           GCP_ERROR_INFO().WithMetadata("cf", name));
-    }
-    it = column_families_.erase(it);
-  }
-
   return Status();
 }
 
-Status PersistentTableOperations::PersistSchema(
-    google::bigtable::admin::v2::Table const& schema) {
+Status PersistentTableOperations::CommitDeletion() {
+  auto maybe_metadata = LoadMetadata();
+  if (!maybe_metadata) {
+    return maybe_metadata.status();
+  }
+  maybe_metadata->set_state(STATE_DELETING);
+  auto status = PersistMetadata(*maybe_metadata);
+  if (!status.ok()) {
+    return UnavailableError(
+        "Failed to commit the table deletion: " + status.message(),
+        GCP_ERROR_INFO().WithMetadata("table", table_name_));
+  }
+  return Status();
+}
+
+Status PersistentTableOperations::PersistMetadata(
+    TableMetadata const& metadata) {
   std::string bytes;
-  if (!schema.SerializeToString(&bytes)) {
+  if (!metadata.SerializeToString(&bytes)) {
     return InternalError(
-        "Failed to serialize table schema",
-        GCP_ERROR_INFO().WithMetadata("schema", schema.DebugString()));
+        "Failed to serialize table metadata",
+        GCP_ERROR_INFO().WithMetadata("metadata", metadata.DebugString()));
   }
 
   rocksdb::WriteOptions wopts;
-  auto* default_cf = db_->DefaultColumnFamily();
-
-  rocksdb::Status s = db_->Put(wopts, default_cf, kSchemaKey, bytes);
+  wopts.sync = true;
+  rocksdb::Status s =
+      db_->Put(wopts, db_->DefaultColumnFamily(), kTableMetadataKey, bytes);
   if (!s.ok()) {
-    return InternalError("Failed to persist schema in RocksDB: " + s.ToString(),
-                         GCP_ERROR_INFO()
-                             .WithMetadata("table", table_name_)
-                             .WithMetadata("key", kSchemaKey));
+    return InternalError(
+        "Failed to persist table metadata in RocksDB: " + s.ToString(),
+        GCP_ERROR_INFO()
+            .WithMetadata("table", table_name_)
+            .WithMetadata("key", kTableMetadataKey));
+  }
+  s = db_->Flush(rocksdb::FlushOptions(), db_->DefaultColumnFamily());
+  if (!s.ok()) {
+    return InternalError(
+        "Failed to flush table metadata in RocksDB: " + s.ToString(),
+        GCP_ERROR_INFO()
+            .WithMetadata("table", table_name_)
+            .WithMetadata("key", kTableMetadataKey));
   }
   return Status();
 }
 
-StatusOr<google::bigtable::admin::v2::Table>
-PersistentTableOperations::LoadSchema() const {
-  std::string serialized;
-
-  rocksdb::ReadOptions ro;
-  rocksdb::Status s =
-      db_->Get(ro, db_->DefaultColumnFamily(), kSchemaKey, &serialized);
-
-  if (s.IsNotFound()) {
-    return NotFoundError("Persisted schema not found in default CF.",
-                         GCP_ERROR_INFO().WithMetadata("key", kSchemaKey));
+StatusOr<TableMetadata> PersistentTableOperations::LoadMetadata() const {
+  auto metadata = ReadMetadata(*db_);
+  if (!metadata) {
+    return metadata.status();
   }
-  if (!s.ok()) {
-    return InternalError("Failed to read persisted schema: " + s.ToString(),
-                         GCP_ERROR_INFO().WithMetadata("key", kSchemaKey));
+  if (!*metadata) {
+    return DataLossError(
+        "Table metadata is missing.",
+        GCP_ERROR_INFO().WithMetadata("key", kTableMetadataKey));
   }
+  return **std::move(metadata);
+}
 
-  google::bigtable::admin::v2::Table schema;
-  if (!schema.ParseFromString(serialized)) {
-    return InternalError("Failed to parse persisted schema proto.",
-                         GCP_ERROR_INFO().WithMetadata("key", kSchemaKey));
+Status PersistentTableOperations::CreateColumnFamily(
+    std::string const& id,
+    google::bigtable::admin::v2::ColumnFamily const& definition) {
+  auto maybe_cf =
+      definition.has_value_type()
+          ? PersistentColumnFamily::ConstructAggregateColumnFamily(
+                definition.value_type(), db_, column_family_options_, id)
+          : PersistentColumnFamily::Create(db_, column_family_options_, id);
+  if (!maybe_cf) {
+    return maybe_cf.status();
   }
+  column_families_.emplace(id, *std::move(maybe_cf));
+  return Status();
+}
 
-  return schema;
+Status PersistentTableOperations::DropColumnFamily(std::string const& id) {
+  auto it = column_families_.find(id);
+  if (it == column_families_.end()) {
+    return InternalError("Column family to drop not found",
+                         GCP_ERROR_INFO().WithMetadata("column_family", id));
+  }
+  auto status = db_->DropColumnFamily(it->second->GetRaw());
+  if (!status.ok()) {
+    return InternalError("Failed to drop column family: " + status.ToString(),
+                         GCP_ERROR_INFO().WithMetadata("column_family", id));
+  }
+  column_families_.erase(it);
+  return Status();
 }
 
 Status PersistentRowTransaction::Commit() {
@@ -762,7 +940,7 @@ Status PersistentRowTransaction::AddToCell(
   // First, the locking does not belong here, but to MutateRow/s.
   // Second, The whole row should be locked, not only
   // the specific column inside it.
-  std::string const column_prefix = KeyCoder::ColumnPrefix(
+  std::string const column_prefix = KeyCoder::EscapedRowColWithSeparator(
       row_key_, add_to_cell.column_qualifier().raw_value());
   rocksdb::Endpoint start(column_prefix, false);
   rocksdb::Endpoint end(column_prefix, true);
@@ -916,7 +1094,7 @@ Status PersistentRowTransaction::DeleteFromColumn(
 
 Status PersistentRowTransaction::DeleteFromRow() {
   bool row_existed = false;
-  std::string const row_prefix = KeyCoder::RowPrefix(row_key_);
+  std::string const row_prefix = KeyCoder::EscapedRowWithSeparator(row_key_);
   rocksdb::Endpoint start(row_prefix, false);
   rocksdb::Endpoint end(row_prefix, true);
 
@@ -977,7 +1155,7 @@ Status PersistentRowTransaction::DeleteFromFamily(
   }
 
   auto const& column_family = column_family_it->second;
-  std::string const row_prefix = KeyCoder::RowPrefix(row_key_);
+  std::string const row_prefix = KeyCoder::EscapedRowWithSeparator(row_key_);
   rocksdb::Endpoint start(row_prefix, false);
   rocksdb::Endpoint end(row_prefix, true);
 
@@ -1049,8 +1227,8 @@ PersistentRowTransaction::ReadModifyWriteRow(
     }
 
     auto const& column_family = maybe_column_family.value();
-    std::string const column_prefix =
-        KeyCoder::ColumnPrefix(request.row_key(), rule.column_qualifier());
+    std::string const column_prefix = KeyCoder::EscapedRowColWithSeparator(
+        request.row_key(), rule.column_qualifier());
 
     // 1. Lock the key range
     // TODO(gustaw): Move locking out of mutations.

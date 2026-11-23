@@ -12,17 +12,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("@com_google_protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
 load(":bigtable_emulator_common.bzl", "bigtable_emulator_common_hdrs", "bigtable_emulator_common_srcs")
 load(":bigtable_emulator_programs.bzl", "bigtable_emulator_programs")
 load(":bigtable_emulator_test_common.bzl", "bigtable_emulator_test_common_hdrs", "bigtable_emulator_test_common_srcs")
 load(":bigtable_emulator_unit_tests.bzl", "bigtable_emulator_unit_tests")
 load(":funcs.bzl", "gen_cc_tests")
 
+proto_library(
+    name = "table_metadata_proto",
+    srcs = ["persistent/table_metadata.proto"],
+    deps = ["@com_google_googleapis//google/bigtable/admin/v2:admin_proto"],
+)
+
+cc_proto_library(
+    name = "table_metadata_cc_proto",
+    deps = [":table_metadata_proto"],
+)
+
 cc_library(
     name = "bigtable_emulator_common",
     srcs = bigtable_emulator_common_srcs,
     hdrs = bigtable_emulator_common_hdrs,
     deps = [
+        ":table_metadata_cc_proto",
         "@com_google_absl//absl/synchronization",
         "@google_cloud_cpp//google/cloud/bigtable:google_cloud_cpp_bigtable",
         "@rocksdb",
@@ -43,10 +57,22 @@ cc_binary(
     ],
 )
 
+cc_library(
+    name = "bigtable_emulator_test_common",
+    testonly = True,
+    srcs = bigtable_emulator_test_common_srcs,
+    hdrs = bigtable_emulator_test_common_hdrs,
+    deps = [
+        ":bigtable_emulator_common",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
 gen_cc_tests(
     srcs = bigtable_emulator_unit_tests,
     deps = [
         ":bigtable_emulator_common",
+        ":bigtable_emulator_test_common",
         "@com_github_grpc_grpc//:grpc",
         "@com_github_grpc_grpc//:grpc++",
         "@com_google_absl//absl/flags:flag",

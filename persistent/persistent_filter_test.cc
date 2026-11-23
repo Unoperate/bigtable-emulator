@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <initializer_list>
 #include <limits>
 #include <memory>
@@ -54,10 +55,7 @@ class PersistentColumnFamilyStreamTest : public ::testing::Test {
   std::string const column_ = "col";
 
   void SetUp() override {
-    auto* unit_test = ::testing::UnitTest::GetInstance();
-    table_path_ = std::string("/tmp/filter_projects/") +
-                  unit_test->current_test_info()->test_suite_name() + "_" +
-                  unit_test->current_test_info()->name();
+    table_path_ = TestDataDir();
 
     std::filesystem::remove_all(table_path_);  // Clean start
     std::filesystem::create_directories(table_path_);
@@ -83,7 +81,7 @@ class PersistentColumnFamilyStreamTest : public ::testing::Test {
   void TearDown() override {
     cf_.reset();
     db_.reset();
-    std::filesystem::remove_all("/tmp/filter_projects");
+    std::filesystem::remove_all(TestDataDir());
   }
 
   void Populate(std::vector<StreamedCell> const& cells) {

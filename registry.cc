@@ -18,6 +18,8 @@
 #include "google/cloud/status_or.h"
 #include "absl/strings/match.h"
 #include "absl/synchronization/mutex.h"
+#include "bigtable_limits.h"
+#include "re2/re2.h"
 #include "table.h"
 #include <google/bigtable/admin/v2/table.pb.h>
 #include <iostream>
@@ -66,7 +68,7 @@ StatusOr<btadmin::Table> ApplyView(std::string const& table_name,
     case btadmin::Table::SCHEMA_VIEW: {
       btadmin::Table res;
       res.set_name(table_name);
-      auto before_view = table.schema();
+      auto before_view = table.Schema();
       *res.mutable_column_families() = before_view->column_families();
       res.set_granularity(before_view->granularity());
       return res;
@@ -75,11 +77,11 @@ StatusOr<btadmin::Table> ApplyView(std::string const& table_name,
     case btadmin::Table::ENCRYPTION_VIEW: {
       btadmin::Table res;
       res.set_name(table_name);
-      *res.mutable_cluster_states() = table.schema()->cluster_states();
+      *res.mutable_cluster_states() = table.Schema()->cluster_states();
       return res;
     }
     case btadmin::Table::FULL:
-      return *table.schema();
+      return *table.Schema();
     default:
       return google::cloud::internal::UnimplementedError(
           "Unsupported view.",
@@ -87,17 +89,24 @@ StatusOr<btadmin::Table> ApplyView(std::string const& table_name,
   }
 }
 
-Status ValidateTableName(std::string const& s) {
-  if (s.empty()) {
-    return InvalidArgumentError("Table name is empty", GCP_ERROR_INFO());
+Status ValidateTableName(std::string const& table_name) {
+  static auto const* const kTableNamePattern =
+      new re2::RE2("projects/[^/]+/instances/[^/]+/tables/([^/]*)");
+  static auto const* const kTableIdPattern =
+      new re2::RE2("[_a-zA-Z0-9][-_.a-zA-Z0-9]{0,49}");
+  std::string table_id;
+  if (!re2::RE2::FullMatch(table_name, *kTableNamePattern, &table_id)) {
+    return InvalidArgumentError(
+        "Table name must have the form "
+        "projects/{project}/instances/{instance}/tables/{table}.",
+        GCP_ERROR_INFO().WithMetadata("table_name", table_name));
   }
-  if (absl::StrContains(s, "//")) {
-    return InvalidArgumentError("Table name must not contain '//'",
-                                GCP_ERROR_INFO().WithMetadata("table_name", s));
-  }
-  if (absl::StrContains(s, '\\')) {
-    return InvalidArgumentError("Table name must not contain '\\\\'",
-                                GCP_ERROR_INFO().WithMetadata("table_name", s));
+  if (!re2::RE2::FullMatch(table_id, *kTableIdPattern)) {
+    return InvalidArgumentError(
+        "Invalid table ID: it must be 1-50 characters long, start with a "
+        "letter, digit or '_', and contain only letters, digits, '_', '-' "
+        "and '.'.",
+        GCP_ERROR_INFO().WithMetadata("table_id", table_id));
   }
   return Status();
 }
@@ -145,11 +154,20 @@ StatusOr<btadmin::Table> Registry::CreateTable(std::string const& table_name,
       return UnavailableError("The emulator is shutting down.",
                               GCP_ERROR_INFO());
     }
-    if (!table_by_name_.emplace(table_name, nullptr).second) {
+    if (table_by_name_.count(table_name) != 0) {
       return google::cloud::internal::AlreadyExistsError(
           "Table already exists.",
           GCP_ERROR_INFO().WithMetadata("table_name", table_name));
     }
+    if (table_by_name_.size() >= kMaxTablesPerInstance) {
+      return google::cloud::internal::ResourceExhaustedError(
+          "Too many tables: an emulator instance can have at most " +
+              std::to_string(kMaxTablesPerInstance) + ".",
+          GCP_ERROR_INFO()
+              .WithMetadata("table_name", table_name)
+              .WithMetadata("limit", std::to_string(kMaxTablesPerInstance)));
+    }
+    table_by_name_.emplace(table_name, nullptr);
   }
 
   // The name is reserved, so the storage is created without the lock.
@@ -158,21 +176,18 @@ StatusOr<btadmin::Table> Registry::CreateTable(std::string const& table_name,
   absl::WriterMutexLock lock(&mu_);
   auto it = table_by_name_.find(table_name);
   if (!maybe_operations) {
-    table_by_name_.erase(it);
+    if (maybe_operations.status().code() != StatusCode::kUnavailable) {
+      table_by_name_.erase(it);
+    }
     return maybe_operations.status();
   }
   it->second = std::make_shared<Table>(table_name, std::move(schema),
                                        *std::move(maybe_operations));
-  return *it->second->schema();
+  return *it->second->Schema();
 }
 
 StatusOr<std::vector<btadmin::Table>> Registry::ListTables(
     std::string const& instance_name, btadmin::Table_View view) {
-  auto st = ValidateTableName(instance_name);
-  if (!st.ok()) {
-    return st;
-  }
-
   std::map<std::string, std::shared_ptr<Table>> table_by_name_copy;
   {
     absl::ReaderMutexLock lock(&mu_);
@@ -203,6 +218,10 @@ StatusOr<btadmin::Table> Registry::GetTable(std::string const& table_name,
   auto maybe_table = FindTable(table_name);
   if (!maybe_table) {
     return maybe_table.status();
+  }
+  auto status = (*maybe_table)->CheckAvailable();
+  if (!status.ok()) {
+    return status;
   }
   return ApplyView(table_name, **maybe_table, view,
                    btadmin::Table::SCHEMA_VIEW);
@@ -260,7 +279,11 @@ Status Registry::DropRowRange(btadmin::DropRowRangeRequest const& request) {
 }
 
 Status Registry::CheckTableExists(std::string const& table_name) {
-  return FindTable(table_name).status();
+  auto maybe_table = FindTable(table_name);
+  if (!maybe_table) {
+    return maybe_table.status();
+  }
+  return (*maybe_table)->CheckAvailable();
 }
 
 StatusOr<std::shared_ptr<Table>> Registry::FindTable(
